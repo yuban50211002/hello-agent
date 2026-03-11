@@ -87,9 +87,6 @@ class McpLoader:
         
         # 打印工具信息
         print(f"成功从 MCP 服务器加载 {len(self.tools)} 个工具:")
-        for tool in self.tools:
-            print(f"  - 工具名: {tool.name}")
-            print(f"    描述: {tool.description}")
         
         return self.tools
 
