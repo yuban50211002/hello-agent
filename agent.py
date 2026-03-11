@@ -6,11 +6,13 @@
 import os
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain.tools import Tool
+from langchain_classic.agents import AgentExecutor, create_openai_tools_agent
+from langchain_classic.tools import Tool
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema import SystemMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import SystemMessage
+
+import mcp_loader
 
 # 加载环境变量
 load_dotenv()
@@ -105,15 +107,11 @@ class SimpleAgent:
         )
         
         # 创建工具
-        self.tools = create_tools()
-        
+        self.tools = mcp_loader.McpLoader().get_tools_sync()
+
         # 创建 prompt
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", """你是一个智能助手，可以帮助用户完成各种任务。
-你有以下能力：
-1. 进行数学计算（加法、乘法）
-2. 查询天气信息
-
 请根据用户的问题，选择合适的工具来完成任务。
 如果用户的问题不需要使用工具，可以直接回答。"""),
             MessagesPlaceholder(variable_name="chat_history", optional=True),
@@ -136,7 +134,7 @@ class SimpleAgent:
             handle_parsing_errors=True
         )
     
-    def run(self, query: str) -> str:
+    async def run(self, query: str) -> str:
         """
         运行 Agent 处理用户查询
         
@@ -146,44 +144,40 @@ class SimpleAgent:
         Returns:
             Agent 的响应结果
         """
+        """异步运行 Agent"""
         try:
-            result = self.agent_executor.invoke({
+            result = await self.agent_executor.ainvoke({  # 使用 ainvoke
                 "input": query
             })
             return result["output"]
         except Exception as e:
             return f"处理请求时出错: {str(e)}"
     
-    def chat(self):
+    async def chat(self):
         """启动交互式对话"""
         print("=" * 50)
-        print("简单 AI Agent 已启动！（使用 Kimi k2.5 模型）")
-        print("可用功能：加法计算、乘法计算、天气查询")
-        print("输入 'quit' 或 'exit' 退出")
+        print("AI Agent 已启动！")
         print("=" * 50)
-        print()
-        
+
         while True:
             try:
                 user_input = input("你: ").strip()
-                
+
                 if user_input.lower() in ['quit', 'exit', '退出']:
                     print("再见！")
                     break
-                
+
                 if not user_input:
                     continue
-                
+
                 print("\nAgent: ", end="")
-                response = self.run(user_input)
+                response = await self.run(user_input)  # 使用 await
                 print(response)
                 print()
-                
+
             except KeyboardInterrupt:
                 print("\n\n再见！")
                 break
-            except Exception as e:
-                print(f"\n错误: {str(e)}\n")
 
 
 def main():
@@ -198,8 +192,9 @@ def main():
         return
     
     # 创建并启动 agent
+    import asyncio
     agent = SimpleAgent(model_name="kimi-k2.5")
-    agent.chat()
+    asyncio.run(agent.chat())
 
 
 if __name__ == "__main__":
