@@ -73,7 +73,7 @@ class EnhancedMemory:
         persist_path: str = "./data/enhanced_memory",
         collection_name: str = "agent_memory",
         enable_faiss: bool = True,
-        faiss_threshold: int = 10000,
+        faiss_threshold: int = 1000,
         embedding_provider: str = "ollama",  # 默认使用 Ollama（免费）
         embedding_model: Optional[str] = None
     ):

@@ -11,6 +11,7 @@ from langchain_classic.agents import AgentExecutor, create_openai_tools_agent
 from langchain_classic.tools import Tool
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_community.llms import Ollama
 from langchain_core.messages import SystemMessage
 
 import mcp_loader
@@ -23,13 +24,11 @@ except ImportError:
     from memory_enhanced import EnhancedMemory  # type: ignore
     ENHANCED_MEMORY_AVAILABLE = False
 
-from memory import AgentMemory
-
 # 加载环境变量
 load_dotenv()
 
 class SimpleAgent:
-    """简单的 AI Agent 类（集成增强型记忆功能）"""
+    """简单的 AI Agent 类（使用增强型记忆）"""
     
     def __init__(
         self, 
@@ -37,8 +36,8 @@ class SimpleAgent:
         temperature: float = 1.0,
         enable_memory: bool = True,
         memory_path: str = "./data/agent_memory",
-        use_enhanced_memory: bool = True,
-        embedding_provider: str = "ollama"
+        embedding_provider: str = "ollama",
+        local_extraction_model: str = "qwen2.5:14b"
     ):
         """
         初始化 Agent
@@ -48,74 +47,97 @@ class SimpleAgent:
             temperature: 生成温度（Kimi k2.5 仅支持 1.0）
             enable_memory: 是否启用记忆功能
             memory_path: 记忆存储路径
-            use_enhanced_memory: 是否使用增强型记忆（Chroma + 向量检索）
             embedding_provider: 嵌入模型提供商 ("ollama", "openai", "huggingface")
+            local_extraction_model: 本地事实提取模型（已废弃，方案4不再使用）
         """
         # 获取 API 配置
         api_key = os.getenv("KIMI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        api_base = os.getenv("KIMI_API_BASE") or os.getenv("OPENAI_API_BASE") or "https://api.moonshot.cn/v1"
+        api_base = os.getenv("KIMI_API_BASE") or os.getenv("OPENAI_API_BASE")
+        
+        # 检查是否有 API key（用于智能降级）
+        self.has_api_key = bool(api_key)
         
         # Kimi k2.5 模型要求 temperature 必须是 1.0
         if model_name == "kimi-k2.5":
             temperature = 1.0
         
-        # 初始化 LLM
-        self.llm = ChatOpenAI(
-            model=model_name,
-            temperature=temperature,
-            api_key=api_key,
-            base_url=api_base
-        )
+        # 初始化主 LLM（用于对话）
+        if self.has_api_key:
+            self.llm = ChatOpenAI(
+                model=model_name,
+                temperature=temperature,
+                api_key=api_key,
+                base_url=api_base
+            )
+            print(f"✓ 主 LLM: {model_name} (云端)")
+        else:
+            # 降级到本地 Ollama
+            from langchain_community.llms import Ollama
+            self.llm = Ollama(
+                model=local_extraction_model,
+                temperature=temperature
+            )
+            print(f"⚠️  未检测到 API key，降级到本地模型: {local_extraction_model}")
+        
+        print(f"✓ 事实提取模式: 嵌入式（单次调用）")
         
         # 创建工具
-        self.tools = mcp_loader.McpLoader().get_tools_sync()
-        
-        # 初始化记忆系统（智能选择）
+        try:
+            self.tools = mcp_loader.McpLoader().get_tools_sync()
+        except Exception as e:
+            print(f"⚠️  工具加载失败: {e}")
+            self.tools = []  # 使用空工具列表
+        # 初始化记忆系统（增强型记忆）
         self.enable_memory = enable_memory
-        self.memory: Optional[Union[EnhancedMemory, AgentMemory]] = None
-        self.is_enhanced_memory = False
+        self.memory: Optional[EnhancedMemory] = None
         
         if enable_memory:
-            # 尝试使用增强型记忆
-            if use_enhanced_memory and ENHANCED_MEMORY_AVAILABLE:
-                try:
-                    self.memory = EnhancedMemory(
-                        llm=self.llm,
-                        persist_path=memory_path,
-                        embedding_provider=embedding_provider,
-                        enable_faiss=True
-                    )
-                    self.is_enhanced_memory = True
-                    print("✓ 已启用增强型记忆系统（Chroma + 向量检索）")
-                except Exception as e:
-                    print(f"⚠️  增强型记忆初始化失败: {e}")
-                    print("   降级到基础记忆系统")
-                    use_enhanced_memory = False
-            
-            # 降级到基础记忆
-            if not use_enhanced_memory or not self.memory:
-                self.memory = AgentMemory(
-                    llm=self.llm,
-                    memory_type="buffer",
-                    persist_path=memory_path
+            if not ENHANCED_MEMORY_AVAILABLE:
+                raise RuntimeError(
+                    "增强型记忆不可用。请确保已安装依赖：\n"
+                    "  poetry install\n"
+                    "并且 memory_enhanced.py 文件存在。"
                 )
-                self.is_enhanced_memory = False
-                
-                # 尝试加载历史记忆
-                try:
-                    self.memory.load_from_disk()
-                    print(f"✓ 已加载历史记忆（{len(self.memory.chat_history.messages)} 条消息）")
-                except:
-                    print("✓ 创建新的记忆系统")
+            
+            try:
+                self.memory = EnhancedMemory(
+                    llm=self.llm,
+                    persist_path=memory_path,
+                    embedding_provider=embedding_provider,
+                    enable_faiss=True
+                )
+                print("✓ 已启用增强型记忆系统（Chroma + 向量检索）")
+            except Exception as e:
+                raise RuntimeError(f"增强型记忆初始化失败: {e}") from e
 
-        # 创建 prompt（集成记忆上下文）
+        # 创建 prompt（集成记忆上下文 + 事实提取）
         system_message = """你是一个智能助手，可以帮助用户完成各种任务。
 请根据用户的问题，选择合适的工具来完成任务。
 如果用户的问题不需要使用工具，可以直接回答。
 
 **重要**: 如果记忆中包含了你的名字或身份信息，请严格遵守并使用该身份！
 
-{memory_context}"""
+{memory_context}
+
+---
+**重要任务**：在回复用户之后，请在最后添加一个隐藏的事实提取标记。格式如下：
+
+<FACTS>
+{{
+  "facts": [
+    {{"content": "用户名字是张三", "category": "user_info", "confidence": "high"}},
+    {{"content": "用户在腾讯工作", "category": "user_info", "confidence": "medium"}}
+  ]
+}}
+</FACTS>
+
+提取规则：
+1. **只提取重要、持久性的信息**（名字、工作、偏好、技能等）
+2. **简单问候不提取**（"你好"、"谢谢"等）
+3. confidence 等级：high（明确陈述）、medium（推断）、low（不确定）
+4. category 分类：user_info（用户信息）、ai_identity（AI身份）、user_preference（用户偏好）、user_skill（用户技能）
+
+**注意**：<FACTS> 标记对用户不可见，只用于内部处理。如果没有需要提取的事实，输出空数组 {{"facts": []}}"""
         
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", system_message),
@@ -141,7 +163,7 @@ class SimpleAgent:
     
     async def run(self, query: str, save_memory: bool = True) -> str:
         """
-        运行 Agent 处理用户查询（支持增强型记忆）
+        运行 Agent 处理用户查询（使用增强型记忆）
         
         Args:
             query: 用户输入的查询
@@ -156,21 +178,15 @@ class SimpleAgent:
             chat_history = []
             
             if self.enable_memory and self.memory:
-                # 获取格式化的记忆上下文（兼容两种记忆系统）
-                if self.is_enhanced_memory:
-                    # 增强型记忆：使用智能检索
-                    memory_context = self.memory.get_memory_context(
-                        query=query,
-                        include_recent=10,      # 包含最近10条对话
-                        include_relevant=5,     # 检索5条相关记忆
-                        include_facts=True      # 包含重要事实
-                    )
-                    # 获取对话历史
-                    chat_history = self.memory.chat_history.messages
-                else:
-                    # 基础记忆
-                    memory_context = self.memory.get_memory_context(query)
-                    chat_history = self.memory.short_term_memory.messages
+                # 使用增强型记忆的智能检索
+                memory_context = self.memory.get_memory_context(
+                    query=query,
+                    include_recent=10,      # 包含最近10条对话
+                    include_relevant=5,     # 检索5条相关记忆
+                    include_facts=True      # 包含重要事实
+                )
+                # 获取对话历史
+                chat_history = self.memory.chat_history.messages
             
             # 执行 Agent
             result = await self.agent_executor.ainvoke({
@@ -179,21 +195,20 @@ class SimpleAgent:
                 "chat_history": chat_history
             })
             
-            response = result["output"]
+            raw_response = result["output"]
+            
+            # 解析响应：分离用户回复和事实提取
+            response, extracted_facts = self._parse_response_and_facts(raw_response)
             
             # 更新记忆
             if save_memory and self.enable_memory and self.memory:
-                if self.is_enhanced_memory:
-                    # 增强型记忆：添加对话
-                    self.memory.add_conversation("human", query)
-                    self.memory.add_conversation("ai", response)
-                else:
-                    # 基础记忆
-                    self.memory.add_message("human", query)
-                    self.memory.add_message("ai", response)
+                # 添加对话
+                self.memory.add_conversation("human", query)
+                self.memory.add_conversation("ai", response)
                 
-                # 自动提取和保存重要信息（简单的规则）
-                self._extract_important_facts(query, response)
+                # 保存提取的事实（如果有）
+                if extracted_facts:
+                    self._save_extracted_facts(extracted_facts)
             
             return response
             
@@ -201,97 +216,87 @@ class SimpleAgent:
             error_msg = f"处理请求时出错: {str(e)}"
             # 即使出错也记录到记忆
             if save_memory and self.enable_memory and self.memory:
-                if self.is_enhanced_memory:
-                    self.memory.add_conversation("human", query)
-                    self.memory.add_conversation("ai", error_msg)
-                else:
-                    self.memory.add_message("human", query)
-                    self.memory.add_message("ai", error_msg)
+                self.memory.add_conversation("human", query)
+                self.memory.add_conversation("ai", error_msg)
             return error_msg
     
-    def _extract_important_facts(self, query: str, response: str):
+    
+    def _parse_response_and_facts(self, raw_response: str):
         """
-        从对话中提取重要信息并保存（兼容两种记忆系统）
+        解析 LLM 响应，分离用户可见的回复和事实提取结果
         
         Args:
-            query: 用户查询
-            response: AI 响应
+            raw_response: LLM 的原始响应（可能包含 <FACTS> 标记）
+            
+        Returns:
+            (user_response, facts): 用户回复文本和提取的事实列表
         """
-        if not self.memory:
+        import re
+        import json
+        
+        # 查找 <FACTS> 标记
+        pattern = r'<FACTS>\s*(.*?)\s*</FACTS>'
+        match = re.search(pattern, raw_response, re.DOTALL | re.IGNORECASE)
+        
+        if match:
+            # 找到事实标记，分离回复和事实
+            user_response = raw_response[:match.start()].strip()
+            facts_json = match.group(1).strip()
+            
+            try:
+                # 解析 JSON
+                facts_data = json.loads(facts_json)
+                facts = facts_data.get("facts", [])
+                
+                if facts:
+                    print(f"✓ [单次调用] 从响应中提取了 {len(facts)} 个事实")
+                
+                return user_response, facts
+                
+            except json.JSONDecodeError as e:
+                print(f"⚠️  事实 JSON 解析失败: {e}")
+                print(f"   原始内容: {facts_json[:100]}...")
+                return user_response, []
+        else:
+            # 没有事实标记，返回原始响应
+            return raw_response, []
+    
+    def _save_extracted_facts(self, facts: list):
+        """
+        保存提取的事实到记忆系统
+        
+        Args:
+            facts: 事实列表，格式 [{"content": "...", "category": "...", "confidence": "..."}]
+        """
+        if not self.memory or not facts:
             return
         
-        # 简单的规则：检测用户自我介绍
-        query_lower = query.lower()
-        
-        # 检测用户名字
-        if any(keyword in query for keyword in ["我叫", "我的名字是", "我是"]):
-            # 提取可能的名字（简单实现）
-            for phrase in ["我叫", "我的名字是", "我是"]:
-                if phrase in query:
-                    parts = query.split(phrase)
-                    if len(parts) > 1:
-                        name_part = parts[1].split("，")[0].split("。")[0].split(" ")[0].strip()
-                        if name_part and len(name_part) < 10:
-                            fact = f"用户名字是 {name_part}"
-                            if self.is_enhanced_memory:
-                                self.memory.add_important_fact(fact, category="user_info")
-                            else:
-                                self.memory.add_important_fact(fact, category="user_info")
-                            break
-        
-        # 检测 AI 自己的名字（用户告诉 AI 它叫什么）
-        if any(keyword in query for keyword in ["你叫", "你的名字是", "记住", "你是"]):
-            for phrase in ["你叫", "你的名字是", "你是"]:
-                if phrase in query:
-                    parts = query.split(phrase)
-                    if len(parts) > 1:
-                        name_part = parts[1].split("，")[0].split("。")[0].split(" ")[0].strip()
-                        if name_part and len(name_part) < 10:
-                            fact = f"AI助手的名字是 {name_part}"
-                            if self.is_enhanced_memory:
-                                self.memory.add_important_fact(fact, category="ai_identity")
-                            else:
-                                self.memory.add_important_fact(fact, category="ai_identity")
-                            print(f"✓ 已记住名字: {name_part}")
-                            break
-        
-        # 检测用户偏好
-        if any(keyword in query for keyword in ["喜欢", "偏好", "爱好", "擅长"]):
-            if self.is_enhanced_memory:
-                self.memory.add_important_fact(query, category="user_preference")
-            else:
-                self.memory.add_important_fact(query, category="user_preference")
-        
-        # 检测技能
-        if any(keyword in query for keyword in ["会", "学过", "使用", "熟悉"]) and \
-           any(tech in query for tech in ["Python", "Java", "JavaScript", "编程", "开发"]):
-            if self.is_enhanced_memory:
-                self.memory.add_important_fact(query, category="user_skill")
-            else:
-                self.memory.add_important_fact(query, category="user_skill")
+        for fact in facts:
+            content = fact.get("content", "")
+            category = fact.get("category", "general")
+            confidence = fact.get("confidence", "medium")
+            
+            if content:
+                self.memory.add_important_fact(
+                    fact=content,
+                    category=category
+                )
+                print(f"  ✓ [{confidence}] {content}")
+    
     
     async def chat(self):
-        """启动交互式对话（支持增强型记忆）"""
+        """启动交互式对话（增强型记忆）"""
         print("=" * 50)
-        memory_type = "增强型记忆" if self.is_enhanced_memory else "基础记忆"
-        print(f"AI Agent 已启动！（{memory_type}）")
+        print("AI Agent 已启动！（增强型记忆）")
         print("=" * 50)
         
         # 显示记忆统计
         if self.enable_memory and self.memory:
-            if self.is_enhanced_memory:
-                stats = self.memory.get_stats()
-                print(f"记忆状态: {stats.get('短期消息数', 0)} 条短期消息, "
-                      f"{stats.get('Chroma 记录数', 0)} 条长期记忆")
-                if stats.get('FAISS 已启用'):
-                    print("✓ FAISS 加速已启用")
-            else:
-                try:
-                    stats = self.memory.get_memory_stats()
-                    print(f"记忆状态: {stats['short_term_messages']} 条消息, "
-                          f"{stats['important_facts']} 个重要事实")
-                except:
-                    print("记忆状态: 已启用")
+            stats = self.memory.get_stats()
+            print(f"记忆状态: {stats.get('短期消息数', 0)} 条短期消息, "
+                  f"{stats.get('Chroma 记录数', 0)} 条长期记忆")
+            if stats.get('FAISS 已启用'):
+                print("✓ FAISS 加速已启用")
         
         print("\n可用命令:")
         print("  - 正常对话: 直接输入你的问题")
@@ -300,10 +305,8 @@ class SimpleAgent:
         print("  - /facts   : 查看重要事实")
         print("  - /clear   : 清除短期记忆")
         print("  - /save    : 保存记忆到磁盘")
-        print("  - /search <关键词> : 搜索相关记忆" + 
-              ("（语义检索）" if self.is_enhanced_memory else ""))
-        if self.is_enhanced_memory:
-            print("  - /export  : 导出到 FAISS 索引")
+        print("  - /search <关键词> : 搜索相关记忆（语义检索）")
+        print("  - /export  : 导出到 FAISS 索引")
         print("  - quit/exit: 退出")
         print("=" * 50 + "\n")
 
@@ -314,12 +317,8 @@ class SimpleAgent:
                 if user_input.lower() in ['quit', 'exit', '退出']:
                     # 保存记忆
                     if self.enable_memory and self.memory:
-                        if self.is_enhanced_memory:
-                            self.memory._save_metadata()
-                            print("✓ 记忆已保存（Chroma 自动持久化）")
-                        else:
-                            self.memory.save_to_disk()
-                            print("✓ 记忆已保存")
+                        self.memory._save_metadata()
+                        print("✓ 记忆已保存（Chroma 自动持久化）")
                     print("再见！")
                     break
 
@@ -339,18 +338,14 @@ class SimpleAgent:
             except KeyboardInterrupt:
                 # 保存记忆
                 if self.enable_memory and self.memory:
-                    if self.is_enhanced_memory:
-                        self.memory._save_metadata()
-                        print("\n✓ 记忆已保存（Chroma 自动持久化）")
-                    else:
-                        self.memory.save_to_disk()
-                        print("\n✓ 记忆已保存")
+                    self.memory._save_metadata()
+                    print("\n✓ 记忆已保存（Chroma 自动持久化）")
                 print("\n再见！")
                 break
     
     def _handle_command(self, command: str):
         """
-        处理特殊命令（兼容增强型记忆）
+        处理特殊命令（增强型记忆）
         
         Args:
             command: 用户输入的命令
@@ -364,14 +359,11 @@ class SimpleAgent:
         arg = cmd_parts[1] if len(cmd_parts) > 1 else ""
         
         if cmd == '/memory':
-            # 显示记忆统计（智能适配）
-            if self.is_enhanced_memory:
-                stats = self.memory.get_stats()
-            else:
-                stats = self.memory.get_memory_stats()
+            # 显示记忆统计
+            stats = self.memory.get_stats()
             
             print("\n" + "=" * 50)
-            print(f"记忆统计 ({'增强型' if self.is_enhanced_memory else '基础型'})")
+            print("记忆统计（增强型）")
             print("=" * 50)
             for key, value in stats.items():
                 print(f"  {key}: {value}")
@@ -415,49 +407,30 @@ class SimpleAgent:
                 print("✗ 已取消\n")
         
         elif cmd == '/save':
-            # 保存记忆
-            if self.is_enhanced_memory:
-                # 增强型记忆自动保存到 Chroma
-                self.memory._save_metadata()
-                print("✓ 记忆元数据已保存（Chroma 自动持久化）\n")
-            else:
-                self.memory.save_to_disk()
-                print("✓ 记忆已保存到磁盘\n")
+            # 保存记忆（Chroma 自动持久化）
+            self.memory._save_metadata()
+            print("✓ 记忆元数据已保存（Chroma 自动持久化）\n")
         
         elif cmd == '/search':
-            # 搜索记忆（增强型支持语义检索）
+            # 搜索记忆（语义检索）
             if not arg:
                 print("用法: /search <关键词>\n")
                 return
             
-            if self.is_enhanced_memory:
-                # 增强型：语义检索
-                results = self.memory.search_memories(arg, k=5)
-                if not results:
-                    print(f"\n未找到与'{arg}'相关的记忆\n")
-                    return
-                
-                print(f"\n🔍 与'{arg}'相关的记忆（语义检索）:")
-                for i, (content, metadata, score) in enumerate(results, 1):
-                    content_preview = content[:100] + "..." if len(content) > 100 else content
-                    print(f"  {i}. {content_preview}")
-                    print(f"      相似度: {score:.3f}, 类型: {metadata.get('type', 'N/A')}")
-                print()
-            else:
-                # 基础型：关键词检索
-                results = self.memory.search_relevant_memories(arg, k=5)
-                if not results:
-                    print(f"\n未找到与'{arg}'相关的记忆\n")
-                    return
-                
-                print(f"\n与'{arg}'相关的记忆:")
-                for i, result in enumerate(results, 1):
-                    content = result[:100] + "..." if len(result) > 100 else result
-                    print(f"  {i}. {content}")
-                print()
+            results = self.memory.search_memories(arg, k=5)
+            if not results:
+                print(f"\n未找到与'{arg}'相关的记忆\n")
+                return
+            
+            print(f"\n🔍 与'{arg}'相关的记忆（语义检索）:")
+            for i, (content, metadata, score) in enumerate(results, 1):
+                content_preview = content[:100] + "..." if len(content) > 100 else content
+                print(f"  {i}. {content_preview}")
+                print(f"      相似度: {score:.3f}, 类型: {metadata.get('type', 'N/A')}")
+            print()
         
-        elif cmd == '/export' and self.is_enhanced_memory:
-            # 仅增强型记忆：导出到 FAISS
+        elif cmd == '/export':
+            # 导出到 FAISS
             print("开始导出记忆到 FAISS 索引...")
             self.memory.export_memories_to_faiss()
             print("✓ 导出完成\n")
@@ -470,13 +443,10 @@ class SimpleAgent:
             print("  /facts   - 查看重要事实")
             print("  /clear   - 清除短期记忆")
             print("  /save    - 保存记忆")
-            print("  /search <关键词> - 搜索相关记忆")
-            if self.is_enhanced_memory:
-                print("  /export  - 导出到 FAISS（增强型）")
+            print("  /search <关键词> - 搜索相关记忆（语义检索）")
+            print("  /export  - 导出到 FAISS 索引")
             print()
-            if not arg:
-                print("用法: /search <关键词>\n")
-                return
+
             
             results = self.memory.search_relevant_memories(arg, k=5)
             if not results:
