@@ -14,30 +14,47 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.llms import Ollama
 from langchain_core.messages import SystemMessage
 
-import mcp_loader
+from tools.mcp import loader as mcp_loader
 
-# 尝试导入增强型记忆，如果失败则使用基础记忆
+# 尝试导入增强型记忆
 try:
-    from memory_enhanced import EnhancedMemory
+    from memory.enhanced_memory import EnhancedMemory
     ENHANCED_MEMORY_AVAILABLE = True
 except ImportError:
-    from memory_enhanced import EnhancedMemory  # type: ignore
+    from memory.enhanced_memory import EnhancedMemory  # type: ignore
     ENHANCED_MEMORY_AVAILABLE = False
 
 # 加载环境变量
 load_dotenv()
 
 class SimpleAgent:
-    """简单的 AI Agent 类（使用增强型记忆）"""
+    """
+    简单的 AI Agent 类（使用增强型记忆）
+    
+    使用方法:
+        # 创建 Agent
+        agent = SimpleAgent()
+        
+        # 异步初始化（必须！）
+        await agent.initialize()
+        
+        # 使用 Agent
+        response = await agent.run("你好")
+    
+    注意:
+        - 必须在 async 函数中使用
+        - 创建后必须调用 await agent.initialize()
+        - 所有方法都是异步的
+    """
     
     def __init__(
         self, 
         model_name: str = "kimi-k2.5", 
         temperature: float = 1.0,
         enable_memory: bool = True,
-        memory_path: str = "./data/agent_memory",
+        memory_path: str = None,
         embedding_provider: str = "ollama",
-        local_extraction_model: str = "qwen2.5:14b"
+        local_extraction_model: str = "qwen2.5:7b"
     ):
         """
         初始化 Agent
@@ -48,7 +65,6 @@ class SimpleAgent:
             enable_memory: 是否启用记忆功能
             memory_path: 记忆存储路径
             embedding_provider: 嵌入模型提供商 ("ollama", "openai", "huggingface")
-            local_extraction_model: 本地事实提取模型（已废弃，方案4不再使用）
         """
         # 获取 API 配置
         api_key = os.getenv("KIMI_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -81,12 +97,11 @@ class SimpleAgent:
         
         print(f"✓ 事实提取模式: 嵌入式（单次调用）")
         
-        # 创建工具
-        try:
-            self.tools = mcp_loader.McpLoader().get_tools_sync()
-        except Exception as e:
-            print(f"⚠️  工具加载失败: {e}")
-            self.tools = []  # 使用空工具列表
+        # 保存配置以便延迟加载工具
+        from config.settings import get_settings
+        self._mcp_config = get_settings().mcp
+        self.tools = []  # 初始化为空列表，将在 initialize() 中加载
+        
         # 初始化记忆系统（增强型记忆）
         self.enable_memory = enable_memory
         self.memory: Optional[EnhancedMemory] = None
@@ -160,6 +175,44 @@ class SimpleAgent:
             verbose=True,
             handle_parsing_errors=True
         )
+    
+    async def initialize(self):
+        """
+        异步初始化方法（加载 MCP 工具）
+        
+        必须在使用 Agent 之前调用此方法。
+        
+        使用示例:
+            agent = SimpleAgent()
+            await agent.initialize()
+            response = await agent.run("你好")
+        """
+        print("⏳ 正在加载 MCP 工具...")
+        
+        try:
+            # 使用异步方式加载工具
+            loader = mcp_loader.McpLoader(config_file=self._mcp_config.config_file)
+            self.tools = await loader.load_tools()
+            print(f"✓ 成功加载 {len(self.tools)} 个工具")
+            
+            # 重新创建 agent 和 agent_executor（使用新加载的工具）
+            agent = create_openai_tools_agent(
+                llm=self.llm,
+                tools=self.tools,
+                prompt=self.prompt
+            )
+            
+            self.agent_executor = AgentExecutor(
+                agent=agent,
+                tools=self.tools,
+                verbose=True,
+                handle_parsing_errors=True
+            )
+            
+        except Exception as e:
+            print(f"⚠️  工具加载失败: {e}")
+            print(f"   将继续运行，但不使用外部工具")
+            self.tools = []
     
     async def run(self, query: str, save_memory: bool = True) -> str:
         """

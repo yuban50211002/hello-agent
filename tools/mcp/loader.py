@@ -27,7 +27,8 @@ class McpLoader:
         if servers_config is None:
             # 尝试从配置文件加载
             if config_file is None:
-                config_file = "mcp.json"
+                # 使用相对于项目根目录的路径
+                config_file = "config/mcp.json"
             
             servers_config = self._load_from_file(config_file)
         
