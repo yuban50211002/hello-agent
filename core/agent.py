@@ -67,18 +67,17 @@ class SimpleAgent:
             embedding_provider: 嵌入模型提供商 ("ollama", "openai", "huggingface")
         """
         # 获取 API 配置
-        api_key = os.getenv("KIMI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        api_base = os.getenv("KIMI_API_BASE") or os.getenv("OPENAI_API_BASE")
-        
-        # 检查是否有 API key（用于智能降级）
-        self.has_api_key = bool(api_key)
-        
-        # Kimi k2.5 模型要求 temperature 必须是 1.0
-        if model_name == "kimi-k2.5":
-            temperature = 1.0
+        from config.settings import get_settings
+        llm_settings = get_settings().llm
+        api_key = llm_settings.api_key
+        api_base = llm_settings.api_base
+
+        # 是否使用本地模型
+        use_local = llm_settings.use_local
+        self.use_local = use_local
         
         # 初始化主 LLM（用于对话）
-        if self.has_api_key:
+        if not self.use_local:
             self.llm = ChatOpenAI(
                 model=model_name,
                 temperature=temperature,
@@ -87,13 +86,13 @@ class SimpleAgent:
             )
             print(f"✓ 主 LLM: {model_name} (云端)")
         else:
-            # 降级到本地 Ollama
-            from langchain_community.llms import Ollama
-            self.llm = Ollama(
+            # 使用本地模型
+            from langchain_community.chat_models import ChatOllama
+            self.llm = ChatOllama(
                 model=local_extraction_model,
                 temperature=temperature
             )
-            print(f"⚠️  未检测到 API key，降级到本地模型: {local_extraction_model}")
+            print(f"✅ 使用本地模型: {local_extraction_model}")
         
         print(f"✓ 事实提取模式: 嵌入式（单次调用）")
         

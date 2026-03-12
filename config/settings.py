@@ -26,6 +26,7 @@ class LLMSettings(BaseSettings):
     api_key: Optional[str] = None
     api_base: Optional[str] = None
     local_model: str = "qwen2.5:7b"
+    use_local: bool = False
     
     class Config:
         env_prefix = "LLM_"
