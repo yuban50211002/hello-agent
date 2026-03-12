@@ -34,17 +34,21 @@ async def main():
         print(f"📋 配置信息:")
         print(f"   项目: {settings.project_name} v{settings.version}")
         print(f"   LLM: {settings.llm.model_name}")
-        print(f"   记忆: {'启用' if settings.memory.enable else '禁用'}")
-        print(f"   嵌入: {settings.memory.embedding_provider}")
+        print(f"   记忆类型: 分级记忆（热层+温层+冷层）")
+        print(f"   记忆状态: {'启用' if settings.memory.enable else '禁用'}")
+        print(f"   嵌入模型: {settings.memory.embedding_provider}")
+        print(f"   摘要生成: LLM 智能摘要")
         print()
         
-        # 初始化 Agent（使用配置）
+        # 初始化 Agent（使用分级记忆 + 千问摘要）
         agent = SimpleAgent(
             model_name=settings.llm.model_name,
             temperature=settings.llm.temperature,
             enable_memory=settings.memory.enable,
             memory_path=settings.memory.persist_path,
-            embedding_provider=settings.memory.embedding_provider
+            embedding_provider=settings.memory.embedding_provider,
+            local_extraction_model="qwen2.5:14b",  # 千问模型
+            memory_type="tiered"  # 使用分级记忆
         )
         
         # 异步初始化（加载 MCP 工具）

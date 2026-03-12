@@ -16,13 +16,13 @@ from langchain_core.messages import SystemMessage
 
 from tools.mcp import loader as mcp_loader
 
-# 尝试导入增强型记忆
+# 尝试导入记忆系统
 try:
+    from memory.tiered_memory import TieredMemory
     from memory.enhanced_memory import EnhancedMemory
-    ENHANCED_MEMORY_AVAILABLE = True
+    MEMORY_AVAILABLE = True
 except ImportError:
-    from memory.enhanced_memory import EnhancedMemory  # type: ignore
-    ENHANCED_MEMORY_AVAILABLE = False
+    MEMORY_AVAILABLE = False
 
 # 加载环境变量
 load_dotenv()
@@ -54,7 +54,8 @@ class SimpleAgent:
         enable_memory: bool = True,
         memory_path: str = None,
         embedding_provider: str = "ollama",
-        local_extraction_model: str = "qwen2.5:7b"
+        local_extraction_model: str = "qwen2.5:7b",
+        memory_type: str = "tiered"  # 新增：记忆类型 "tiered" 或 "enhanced"
     ):
         """
         初始化 Agent
@@ -65,6 +66,8 @@ class SimpleAgent:
             enable_memory: 是否启用记忆功能
             memory_path: 记忆存储路径
             embedding_provider: 嵌入模型提供商 ("ollama", "openai", "huggingface")
+            local_extraction_model: 本地提取模型名称
+            memory_type: 记忆类型 ("tiered" 分级记忆 或 "enhanced" 增强记忆)
         """
         # 获取 API 配置
         from config.settings import get_settings
@@ -96,33 +99,50 @@ class SimpleAgent:
         
         print(f"✓ 事实提取模式: 嵌入式（单次调用）")
         
+        # 保存记忆配置
+        self.memory_type = memory_type
+        self.local_extraction_model = local_extraction_model
+        
         # 保存配置以便延迟加载工具
         from config.settings import get_settings
         self._mcp_config = get_settings().mcp
         self.tools = []  # 初始化为空列表，将在 initialize() 中加载
         
-        # 初始化记忆系统（增强型记忆）
+        # 初始化记忆系统
         self.enable_memory = enable_memory
-        self.memory: Optional[EnhancedMemory] = None
+        self.memory: Optional[Union[TieredMemory, EnhancedMemory]] = None
         
         if enable_memory:
-            if not ENHANCED_MEMORY_AVAILABLE:
+            if not MEMORY_AVAILABLE:
                 raise RuntimeError(
-                    "增强型记忆不可用。请确保已安装依赖：\n"
+                    "记忆系统不可用。请确保已安装依赖：\n"
                     "  poetry install\n"
-                    "并且 memory_enhanced.py 文件存在。"
+                    "并且记忆模块文件存在。"
                 )
             
             try:
-                self.memory = EnhancedMemory(
-                    llm=self.llm,
-                    persist_path=memory_path,
-                    embedding_provider=embedding_provider,
-                    enable_faiss=True
-                )
-                print("✓ 已启用增强型记忆系统（Chroma + 向量检索）")
+                if memory_type == "tiered":
+                    # 使用分级记忆系统（推荐）
+                    self.memory = TieredMemory(
+                        persist_path=memory_path or "./data/tiered_memory",
+                        hot_layer_size=5,      # 热层保留 10 轮对话
+                        warm_layer_size=9,     # 温层保留 50 个摘要
+                        embedding_model="nomic-embed-text",
+                        llm=self.llm            # 传入 LLM 用于生成摘要
+                    )
+                    print("✓ 已启用分级记忆系统（热层+温层+冷层）")
+                    print(f"  - 摘要模型: {model_name if not use_local else local_extraction_model}")
+                else:
+                    # 使用增强型记忆（旧版）
+                    self.memory = EnhancedMemory(
+                        llm=self.llm,
+                        persist_path=memory_path or "./data/enhanced_memory",
+                        embedding_provider=embedding_provider,
+                        enable_faiss=True
+                    )
+                    print("✓ 已启用增强型记忆系统（Chroma + 向量检索）")
             except Exception as e:
-                raise RuntimeError(f"增强型记忆初始化失败: {e}") from e
+                raise RuntimeError(f"记忆系统初始化失败: {e}") from e
 
         # 创建 prompt（集成记忆上下文 + 事实提取）
         system_message = """你是一个智能助手，可以帮助用户完成各种任务。
@@ -215,7 +235,7 @@ class SimpleAgent:
     
     async def run(self, query: str, save_memory: bool = True) -> str:
         """
-        运行 Agent 处理用户查询（使用增强型记忆）
+        运行 Agent 处理用户查询（支持分级记忆和增强型记忆）
         
         Args:
             query: 用户输入的查询
@@ -230,15 +250,26 @@ class SimpleAgent:
             chat_history = []
             
             if self.enable_memory and self.memory:
-                # 使用增强型记忆的智能检索
-                memory_context = self.memory.get_memory_context(
-                    query=query,
-                    include_recent=10,      # 包含最近10条对话
-                    include_relevant=5,     # 检索5条相关记忆
-                    include_facts=True      # 包含重要事实
-                )
-                # 获取对话历史
-                chat_history = self.memory.chat_history.messages
+                if self.memory_type == "tiered":
+                    # 使用分级记忆的检索方法
+                    memory_context = self.memory.retrieve_context(
+                        query=query,
+                        hot_layer_size=5,      # 最近 5 轮对话
+                        warm_layer_size=3,     # 3 个相关摘要
+                        cold_layer_size=2      # 2 条历史记录
+                    )
+                    # 获取热层对话历史
+                    chat_history = self.memory.get_hot_layer_messages()
+                else:
+                    # 使用增强型记忆的智能检索
+                    memory_context = self.memory.get_memory_context(
+                        query=query,
+                        include_recent=10,      # 包含最近10条对话
+                        include_relevant=5,     # 检索5条相关记忆
+                        include_facts=True      # 包含重要事实
+                    )
+                    # 获取对话历史
+                    chat_history = self.memory.chat_history.messages
             
             # 执行 Agent
             result = await self.agent_executor.ainvoke({
@@ -254,13 +285,20 @@ class SimpleAgent:
             
             # 更新记忆
             if save_memory and self.enable_memory and self.memory:
-                # 添加对话
-                self.memory.add_conversation("human", query)
-                self.memory.add_conversation("ai", response)
-                
-                # 保存提取的事实（如果有）
-                if extracted_facts:
-                    self._save_extracted_facts(extracted_facts)
+                if self.memory_type == "tiered":
+                    # 分级记忆：添加对话到热层
+                    self.memory.add_conversation(
+                        user_msg=query,
+                        ai_msg=response
+                    )
+                else:
+                    # 增强型记忆：添加到对话历史
+                    self.memory.add_conversation("human", query)
+                    self.memory.add_conversation("ai", response)
+                    
+                    # 保存提取的事实（仅增强型记忆支持）
+                    if extracted_facts:
+                        self._save_extracted_facts(extracted_facts)
             
             return response
             
@@ -268,8 +306,11 @@ class SimpleAgent:
             error_msg = f"处理请求时出错: {str(e)}"
             # 即使出错也记录到记忆
             if save_memory and self.enable_memory and self.memory:
-                self.memory.add_conversation("human", query)
-                self.memory.add_conversation("ai", error_msg)
+                if self.memory_type == "tiered":
+                    self.memory.add_conversation(user_msg=query, ai_msg=error_msg)
+                else:
+                    self.memory.add_conversation("human", query)
+                    self.memory.add_conversation("ai", error_msg)
             return error_msg
     
     
@@ -315,7 +356,7 @@ class SimpleAgent:
     
     def _save_extracted_facts(self, facts: list):
         """
-        保存提取的事实到记忆系统
+        保存提取的事实到记忆系统（仅增强型记忆支持）
         
         Args:
             facts: 事实列表，格式 [{"content": "...", "category": "...", "confidence": "..."}]
@@ -323,6 +364,11 @@ class SimpleAgent:
         if not self.memory or not facts:
             return
         
+        # 分级记忆不支持独立的事实提取（事实会包含在摘要中）
+        if self.memory_type == "tiered":
+            return
+        
+        # 增强型记忆支持事实提取
         for fact in facts:
             content = fact.get("content", "")
             category = fact.get("category", "general")
@@ -337,16 +383,27 @@ class SimpleAgent:
     
     
     async def chat(self):
-        """启动交互式对话（增强型记忆）"""
+        """启动交互式对话（支持分级记忆和增强型记忆）"""
         print("=" * 50)
-        print("AI Agent 已启动！（增强型记忆）")
+        if self.memory_type == "tiered":
+            print("AI Agent 已启动！（分级记忆系统）")
+        else:
+            print("AI Agent 已启动！（增强型记忆）")
         print("=" * 50)
         
         # 显示记忆统计
         if self.enable_memory and self.memory:
             stats = self.memory.get_stats()
-            print(f"记忆状态: {stats.get('短期消息数', 0)} 条短期消息, "
-                  f"{stats.get('Chroma 记录数', 0)} 条长期记忆")
+            if self.memory_type == "tiered":
+                print(f"记忆状态:")
+                print(f"  - 热层: {stats.get('热层对话数', 0)} 轮对话")
+                print(f"  - 温层: {stats.get('温层摘要数', 0)} 个摘要")
+                print(f"  - 冷层: {stats.get('冷层记录数', 0)} 条记录")
+                if stats.get('文档总数', 0) > 0:
+                    print(f"  - 文档: {stats.get('文档总数', 0)} 个 ({stats.get('文档总大小(MB)', 0)} MB)")
+            else:
+                print(f"记忆状态: {stats.get('短期消息数', 0)} 条短期消息, "
+                      f"{stats.get('Chroma 记录数', 0)} 条长期记忆")
             if stats.get('FAISS 已启用'):
                 print("✓ FAISS 加速已启用")
         
@@ -369,8 +426,13 @@ class SimpleAgent:
                 if user_input.lower() in ['quit', 'exit', '退出']:
                     # 保存记忆
                     if self.enable_memory and self.memory:
-                        self.memory._save_metadata()
-                        print("✓ 记忆已保存（Chroma 自动持久化）")
+                        if self.memory_type == "tiered":
+                            # 分级记忆自动保存，无需手动调用
+                            print("✓ 记忆已保存（分级记忆自动持久化）")
+                        else:
+                            # 增强型记忆需要手动保存
+                            self.memory._save_metadata()
+                            print("✓ 记忆已保存（Chroma 自动持久化）")
                     print("再见！")
                     break
 
@@ -390,14 +452,19 @@ class SimpleAgent:
             except KeyboardInterrupt:
                 # 保存记忆
                 if self.enable_memory and self.memory:
-                    self.memory._save_metadata()
-                    print("\n✓ 记忆已保存（Chroma 自动持久化）")
+                    if self.memory_type == "tiered":
+                        # 分级记忆自动保存，无需手动调用
+                        print("\n✓ 记忆已保存（分级记忆自动持久化）")
+                    else:
+                        # 增强型记忆需要手动保存
+                        self.memory._save_metadata()
+                        print("\n✓ 记忆已保存（Chroma 自动持久化）")
                 print("\n再见！")
                 break
     
     def _handle_command(self, command: str):
         """
-        处理特殊命令（增强型记忆）
+        处理特殊命令（支持分级记忆和增强型记忆）
         
         Args:
             command: 用户输入的命令
@@ -415,7 +482,10 @@ class SimpleAgent:
             stats = self.memory.get_stats()
             
             print("\n" + "=" * 50)
-            print("记忆统计（增强型）")
+            if self.memory_type == "tiered":
+                print("记忆统计（分级记忆）")
+            else:
+                print("记忆统计（增强型）")
             print("=" * 50)
             for key, value in stats.items():
                 print(f"  {key}: {value}")
@@ -423,20 +493,41 @@ class SimpleAgent:
         
         elif cmd == '/history':
             # 显示对话历史
-            history = self.memory.get_chat_history()
-            if not history:
-                print("\n暂无对话历史\n")
-                return
-            
-            print("\n对话历史:")
-            for i, msg in enumerate(history[-10:], 1):  # 最近10条
-                role = "你" if msg['role'] == 'human' else "AI"
-                content = msg['content'][:100] + "..." if len(msg['content']) > 100 else msg['content']
-                print(f"  {i}. {role}: {content}")
-            print()
+            if self.memory_type == "tiered":
+                # 分级记忆：显示热层对话
+                conversations = self.memory.hot_conversations
+                if not conversations:
+                    print("\n暂无对话历史\n")
+                    return
+                
+                print("\n热层对话历史:")
+                for i, turn in enumerate(conversations[-10:], 1):  # 最近10轮
+                    user_preview = turn.user_message[:50] + "..." if len(turn.user_message) > 50 else turn.user_message
+                    ai_preview = turn.ai_message[:50] + "..." if len(turn.ai_message) > 50 else turn.ai_message
+                    print(f"  {i}. 你: {user_preview}")
+                    print(f"     AI: {ai_preview}")
+                print()
+            else:
+                # 增强型记忆
+                history = self.memory.get_chat_history()
+                if not history:
+                    print("\n暂无对话历史\n")
+                    return
+                
+                print("\n对话历史:")
+                for i, msg in enumerate(history[-10:], 1):  # 最近10条
+                    role = "你" if msg['role'] == 'human' else "AI"
+                    content = msg['content'][:100] + "..." if len(msg['content']) > 100 else msg['content']
+                    print(f"  {i}. {role}: {content}")
+                print()
         
         elif cmd == '/facts':
-            # 显示重要事实
+            # 显示重要事实（仅增强型记忆支持）
+            if self.memory_type == "tiered":
+                print("\n分级记忆暂不支持事实提取功能")
+                print("提示: 事实信息会自动包含在摘要中\n")
+                return
+            
             facts = self.memory.important_facts
             if not facts:
                 print("\n暂无重要事实\n")
@@ -450,18 +541,25 @@ class SimpleAgent:
             print()
         
         elif cmd == '/clear':
-            # 清除短期记忆
-            confirm = input("确认清除短期记忆？(y/n): ").lower()
+            # 清除记忆
+            confirm = input("确认清除记忆？(y/n): ").lower()
             if confirm == 'y':
-                self.memory.clear_short_term_memory()
-                print("✓ 短期记忆已清除\n")
+                if self.memory_type == "tiered":
+                    self.memory.clear_all()
+                    print("✓ 分级记忆已清除（冷层除外）\n")
+                else:
+                    self.memory.clear_short_term_memory()
+                    print("✓ 短期记忆已清除\n")
             else:
                 print("✗ 已取消\n")
         
         elif cmd == '/save':
-            # 保存记忆（Chroma 自动持久化）
-            self.memory._save_metadata()
-            print("✓ 记忆元数据已保存（Chroma 自动持久化）\n")
+            # 保存记忆
+            if self.memory_type == "tiered":
+                print("✓ 分级记忆自动保存，无需手动调用\n")
+            else:
+                self.memory._save_metadata()
+                print("✓ 记忆元数据已保存（Chroma 自动持久化）\n")
         
         elif cmd == '/search':
             # 搜索记忆（语义检索）
@@ -469,20 +567,37 @@ class SimpleAgent:
                 print("用法: /search <关键词>\n")
                 return
             
-            results = self.memory.search_memories(arg, k=5)
-            if not results:
-                print(f"\n未找到与'{arg}'相关的记忆\n")
-                return
-            
-            print(f"\n🔍 与'{arg}'相关的记忆（语义检索）:")
-            for i, (content, metadata, score) in enumerate(results, 1):
-                content_preview = content[:100] + "..." if len(content) > 100 else content
-                print(f"  {i}. {content_preview}")
-                print(f"      相似度: {score:.3f}, 类型: {metadata.get('type', 'N/A')}")
-            print()
+            if self.memory_type == "tiered":
+                # 分级记忆：使用 retrieve_context
+                context = self.memory.retrieve_context(
+                    query=arg,
+                    hot_layer_size=5,
+                    warm_layer_size=3,
+                    cold_layer_size=3
+                )
+                print(f"\n🔍 与'{arg}'相关的记忆:")
+                print(context)
+                print()
+            else:
+                # 增强型记忆：使用 search_memories
+                results = self.memory.search_memories(arg, k=5)
+                if not results:
+                    print(f"\n未找到与'{arg}'相关的记忆\n")
+                    return
+                
+                print(f"\n🔍 与'{arg}'相关的记忆（语义检索）:")
+                for i, (content, metadata, score) in enumerate(results, 1):
+                    content_preview = content[:100] + "..." if len(content) > 100 else content
+                    print(f"  {i}. {content_preview}")
+                    print(f"      相似度: {score:.3f}, 类型: {metadata.get('type', 'N/A')}")
+                print()
         
         elif cmd == '/export':
-            # 导出到 FAISS
+            # 导出到 FAISS（仅增强型记忆支持）
+            if self.memory_type == "tiered":
+                print("\n分级记忆暂不支持 FAISS 导出\n")
+                return
+            
             print("开始导出记忆到 FAISS 索引...")
             self.memory.export_memories_to_faiss()
             print("✓ 导出完成\n")
