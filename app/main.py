@@ -40,15 +40,13 @@ async def main():
         print(f"   摘要生成: LLM 智能摘要")
         print()
         
-        # 初始化 Agent（使用分级记忆 + 千问摘要）
+        # 初始化 Agent（使用分级记忆）
         agent = SimpleAgent(
             model_name=settings.llm.model_name,
             temperature=settings.llm.temperature,
             enable_memory=settings.memory.enable,
             memory_path=settings.memory.persist_path,
-            embedding_provider=settings.memory.embedding_provider,
-            local_extraction_model="qwen2.5:14b",  # 千问模型
-            memory_type="tiered"  # 使用分级记忆
+            local_extraction_model="qwen2.5:7b"  # 千问模型
         )
         
         # 异步初始化（加载 MCP 工具）
