@@ -20,8 +20,10 @@ sys.path.insert(0, str(project_root))
 from core.agent import SimpleAgent
 from config.settings import get_settings
 
+def main():
+    asyncio.run(main_async())
 
-async def main():
+async def main_async():
     """主函数"""
     print("=" * 60)
     print("🤖 AI Agent 启动中...")
@@ -69,4 +71,4 @@ async def main():
 
 if __name__ == "__main__":
     # 运行主函数
-    asyncio.run(main())
+    main()

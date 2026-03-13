@@ -5,7 +5,17 @@ description = "一个基于 LangChain 和 Kimi k2.5 的简单 AI Agent"
 authors = ["Your Name <your.email@example.com>"]
 readme = "README.md"
 license = "MIT"
-package-mode = false
+# package-mode = false  # 注释掉，启用包模式
+packages = [
+    {include = "app"},
+    {include = "core"},
+    {include = "config"},
+    {include = "memory"},
+    {include = "tools"},
+    {include = "llm"},
+    {include = "utils"},
+    {include = "data"}
+]
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -27,4 +37,4 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
-agent = "agent:main"
+agent = "app.main:main"
