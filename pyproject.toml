@@ -25,8 +25,9 @@ langchain-mcp-adapters = "^0.2.1"
 python-dotenv = "^1.0.1"
 langchain-classic = "^1.0.2"
 langchain-community = "^0.3.0"
+langchain-ollama = "^1.0.1"
+langchain-chroma = "^1.1.0"
 tiktoken = "^0.7.0"
-ollama = "^0.6.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"

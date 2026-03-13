@@ -14,9 +14,7 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
-# 项目根目录（config 目录的父目录）
-PROJECT_ROOT = Path(__file__).parent.parent
-DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "agent_memory"
+DEFAULT_DATA_DIR = Path("./data/agent_memory")
 
 
 class LLMSettings(BaseSettings):
@@ -57,7 +55,7 @@ class MemorySettings(BaseSettings):
 
 class MCPSettings(BaseSettings):
     """MCP 配置"""
-    config_file: str = str(PROJECT_ROOT / "config" / "mcp.json")  # 使用绝对路径
+    config_file: str = str("./config/mcp.json")
     enable: bool = True
     
     class Config:

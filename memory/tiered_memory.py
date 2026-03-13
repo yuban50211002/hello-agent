@@ -15,8 +15,8 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
+from langchain_chroma import Chroma
 
 from memory.document_manager import DocumentManager
 
