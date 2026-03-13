@@ -126,7 +126,7 @@ class SimpleAgent:
             except Exception as e:
                 raise RuntimeError(f"记忆系统初始化失败: {e}") from e
 
-        # 创建 prompt（集成记忆上下文 + 事实提取）
+        # 创建 prompt（集成记忆上下文 + 事实提取 + 文档生成）
         system_message = """你是一个智能助手，可以帮助用户完成各种任务。
 请根据用户的问题，选择合适的工具来完成任务。
 如果用户的问题不需要使用工具，可以直接回答。
@@ -136,7 +136,29 @@ class SimpleAgent:
 {memory_context}
 
 ---
-**重要任务**：在回复用户之后，请在最后添加一个隐藏的事实提取标记。格式如下：
+**文档生成指令**：当你生成需要保存为文件的内容时（如代码、配置文件、文档等），请使用以下格式：
+
+<DOCUMENT>
+{{
+  "filename": "example.py",
+  "type": "python",
+  "description": "Python 脚本示例"
+}}
+---CONTENT---
+# 这里是文件内容
+print("Hello, World!")
+---END---
+</DOCUMENT>
+
+支持的文件类型：python, javascript, html, css, json, yaml, markdown, text
+- 可以在一次响应中包含多个 <DOCUMENT> 标签
+- filename 必须包含扩展名
+- type 用于语法高亮和管理
+- description 简短描述文件用途
+- 内容部分使用 ---CONTENT--- 和 ---END--- 包裹
+
+---
+**事实提取任务**：在回复用户之后，请在最后添加一个隐藏的事实提取标记。格式如下：
 
 <FACTS>
 {{
@@ -153,7 +175,7 @@ class SimpleAgent:
 3. confidence 等级：high（明确陈述）、medium（推断）、low（不确定）
 4. category 分类：user_info（用户信息）、ai_identity（AI身份）、user_preference（用户偏好）、user_skill（用户技能）
 
-**注意**：<FACTS> 标记对用户不可见，只用于内部处理。如果没有需要提取的事实，输出空数组 {{"facts": []}}"""
+**注意**：<FACTS> 和 <DOCUMENT> 标记对用户不可见，只用于内部处理。如果没有需要提取的事实，输出空数组 {{"facts": []}}"""
         
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", system_message),
@@ -254,15 +276,19 @@ class SimpleAgent:
             # 解析响应：分离用户回复和事实提取
             response, extracted_facts = self._parse_response_and_facts(raw_response)
             
-            # 更新记忆
-            if save_memory and self.enable_memory and self.memory:
-                # 分级记忆：添加对话到热层
-                self.memory.add_conversation(
-                    user_msg=query,
-                    ai_msg=response
-                )
+            # 解析并保存 LLM 标记的文档
+            clean_response, doc_infos = self._parse_and_save_documents(query, response)
             
-            return response
+            # 更新记忆（如果没有文档，使用普通方式）
+            if save_memory and self.enable_memory and self.memory:
+                if not doc_infos:
+                    # 普通对话
+                    self.memory.add_conversation(
+                        user_msg=query,
+                        ai_msg=clean_response
+                    )
+            
+            return clean_response
             
         except Exception as e:
             error_msg = f"处理请求时出错: {str(e)}"
@@ -312,6 +338,88 @@ class SimpleAgent:
             # 没有事实标记，返回原始响应
             return raw_response, []
     
+    def _parse_and_save_documents(self, query: str, response: str) -> tuple[str, list]:
+        """
+        解析并保存 LLM 标记的文档
+        
+        Args:
+            query: 用户查询
+            response: AI 响应
+        
+        Returns:
+            (clean_response, doc_infos): 清理后的响应和文档信息列表
+        """
+        import re
+        import json
+        
+        # 查找所有 <DOCUMENT> 标记
+        pattern = r'<DOCUMENT>\s*(.*?)\s*---CONTENT---\s*(.*?)\s*---END---\s*</DOCUMENT>'
+        matches = re.finditer(pattern, response, re.DOTALL | re.IGNORECASE)
+        
+        doc_infos = []
+        clean_response = response
+        
+        for match in matches:
+            try:
+                # 解析元数据
+                metadata_json = match.group(1).strip()
+                content = match.group(2).strip()
+                
+                metadata = json.loads(metadata_json)
+                
+                filename = metadata.get('filename', 'untitled.txt')
+                doc_type = metadata.get('type', 'text')
+                description = metadata.get('description', '')
+                
+                # 保存文档
+                if self.enable_memory and self.memory:
+                    doc_info = self.memory.add_conversation_with_document(
+                        user_msg=query,
+                        ai_msg_prefix=f"已生成文件: {filename}",
+                        document_content=content,
+                        filename=filename,
+                        doc_type=doc_type,
+                        metadata={'description': description}
+                    )
+                    
+                    # 使用实际保存的文件名（可能带版本号）
+                    actual_filename = doc_info.get('filename', filename)
+                    
+                    doc_infos.append({
+                        'filename': actual_filename,
+                        'type': doc_type,
+                        'description': description,
+                        'size': len(content),
+                        'doc_id': doc_info['doc_id']
+                    })
+                    
+                    print(f"✓ 文档已保存: {actual_filename} ({doc_type}, {len(content)} 字符)")
+                    
+                    # 如果文件名发生了变化（添加了版本号），提示用户
+                    if actual_filename != filename:
+                        print(f"  ⚠️  文件名已存在，自动保存为: {actual_filename}")
+                
+                # 从响应中移除 <DOCUMENT> 标记，替换为简短提示
+                # 使用实际文件名（如果有的话）
+                display_filename = doc_infos[-1]['filename'] if doc_infos else filename
+                replacement = f"\n\n📄 **已生成文件**: `{display_filename}`\n"
+                if description:
+                    replacement += f"   - 说明: {description}\n"
+                replacement += f"   - 类型: {doc_type}\n"
+                replacement += f"   - 大小: {len(content)} 字符\n"
+                replacement += f"   - 使用 `/doc {display_filename}` 查看完整内容\n"
+                
+                clean_response = clean_response.replace(match.group(0), replacement)
+                
+            except json.JSONDecodeError as e:
+                print(f"⚠️ 文档元数据解析失败: {e}")
+                continue
+            except Exception as e:
+                print(f"⚠️ 文档保存失败: {e}")
+                continue
+        
+        return clean_response, doc_infos
+    
     def _save_extracted_facts(self, facts: list):
         """
         保存提取的事实到记忆系统（仅增强型记忆支持）
@@ -343,6 +451,8 @@ class SimpleAgent:
         print("  - 正常对话: 直接输入你的问题")
         print("  - /memory  : 查看记忆统计")
         print("  - /history : 查看对话历史（热层）")
+        print("  - /docs    : 列出生成的文档")
+        print("  - /doc <id>: 查看文档内容")
         print("  - /clear   : 清除记忆")
         print("  - /save    : 保存记忆（自动）")
         print("  - /search <关键词> : 搜索相关记忆")
@@ -449,6 +559,69 @@ class SimpleAgent:
             )
             print(f"\n🔍 与'{arg}'相关的记忆:")
             print(context)
+            print()
+        
+        elif cmd == '/docs':
+            # 列出所有文档
+            docs = self.memory.list_documents(limit=20)
+            if not docs:
+                print("\n暂无生成的文档\n")
+                return
+            
+            print("\n📚 生成的文档:")
+            print("-" * 60)
+            for i, doc in enumerate(docs, 1):
+                print(f"{i}. {doc['filename']}")
+                print(f"   ID: {doc['doc_id'][:16]}...")
+                print(f"   类型: {doc['doc_type']}")
+                print(f"   大小: {doc['size']} 字符")
+                print(f"   创建时间: {doc['created_at']}")
+                if doc.get('user_query'):
+                    query_preview = doc['user_query'][:50] + "..." if len(doc['user_query']) > 50 else doc['user_query']
+                    print(f"   查询: {query_preview}")
+                print()
+            print(f"提示: 使用 /doc <编号> 查看文档内容")
+            print()
+        
+        elif cmd == '/doc':
+            # 查看文档内容
+            if not arg:
+                print("用法: /doc <编号或ID>\n")
+                return
+            
+            docs = self.memory.list_documents(limit=20)
+            if not docs:
+                print("\n暂无文档\n")
+                return
+            
+            # 尝试按编号或 ID 查找
+            doc_to_show = None
+            try:
+                # 尝试作为编号
+                index = int(arg) - 1
+                if 0 <= index < len(docs):
+                    doc_to_show = docs[index]
+            except ValueError:
+                # 作为 ID 查找
+                print("\n输入编号，例如：1，2，3...\n")
+            
+            if not doc_to_show:
+                print(f"\n未找到文档: {arg}\n")
+                return
+            
+            # 读取文档内容
+            content = self.memory.get_document(doc_to_show['doc_id'])
+            if not content:
+                print(f"\n无法读取文档: {doc_to_show['filename']}\n")
+                return
+            
+            print(f"\n📄 文档: {doc_to_show['filename']}")
+            print("=" * 60)
+            print(content)
+            print("=" * 60)
+            print(f"大小: {doc_to_show['size']} 字符")
+            print(f"类型: {doc_to_show['doc_type']}")
+            print(f"路径: {doc_to_show['file_path']}")
             print()
             print("✓ 导出完成\n")
         

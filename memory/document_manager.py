@@ -64,8 +64,22 @@ class DocumentManager:
             ext = self._get_extension(doc_type)
             filename = f"doc_{timestamp}_{doc_id[:8]}{ext}"
         
-        # 保存文件
+        # 处理文件名冲突：如果文件已存在，自动添加版本号
+        original_filename = filename
         file_path = self.documents_dir / filename
+        version = 1
+        
+        while file_path.exists():
+            # 分离文件名和扩展名
+            stem = Path(original_filename).stem
+            suffix = Path(original_filename).suffix
+            
+            # 添加版本号
+            version += 1
+            filename = f"{stem}_v{version}{suffix}"
+            file_path = self.documents_dir / filename
+        
+        # 保存文件
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)
         
