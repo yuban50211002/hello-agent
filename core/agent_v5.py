@@ -58,9 +58,10 @@ class SimpleAgentV5:
             temperature=temperature,
             api_key=llm_settings.api_key,
             base_url=llm_settings.api_base,
-            thinking={"type": "enabled", "budget_tokens": 8192}  # ✅ 启用 thinking 模式
+            thinking={"type": "enabled", "budget_tokens": 8192},  # ✅ 启用 thinking 模式
+            request_timeout=llm_settings.request_timeout  # ✅ 从配置读取超时时间
         )
-        print(f"✓ LLM: {model_name} (KimiChatModel, thinking 模式已启用，支持 reasoning_content)")
+        print(f"✓ LLM: {model_name} (KimiChatModel, thinking 模式已启用，超时: {llm_settings.request_timeout}秒)")
         
         # 保存配置
         self._mcp_config = get_settings().mcp
@@ -99,10 +100,11 @@ class SimpleAgentV5:
    - 当你创建代码、配置文件、文档等需要保存的内容时使用
    - 示例：用户说"写一个 Python Hello World"，创建代码后调用 save_document
 
-**重要**：
+**重要规则**：
 - 这些工具是**可选的**，根据实际需要决定是否调用
 - 可以只调用其中一个，或两个都调用，或都不调用
 - 正常对话不需要调用任何工具
+- **如果工具调用失败，不要重试！** 直接向用户说明情况即可
 
 **示例**：
 
@@ -211,12 +213,18 @@ class SimpleAgentV5:
             )
 
             # 🔥 调用 Agent（使用新 API）
-            result = await self.agent.ainvoke({
-                "messages": [
-                    SystemMessage(content=prompt_with_memory),
-                    ("user", query)
-                ]
-            })
+            # 限制递归深度，避免工具失败时无限重试
+            result = await self.agent.ainvoke(
+                {
+                    "messages": [
+                        SystemMessage(content=prompt_with_memory),
+                        ("user", query)
+                    ]
+                },
+                config={
+                    "recursion_limit": 10  # 🔥 最多 5 次递归（包含工具调用）
+                }
+            )
             
             # 获取最终响应（新 API 返回格式）
             messages = result.get("messages", [])
@@ -349,8 +357,8 @@ class SimpleAgentV5:
                         print("=" * 60)
                         for doc in docs:
                             print(f"  📁 {doc['filename']}")
-                            print(f"     类型: {doc['type']}")
-                            print(f"     大小: {doc['size_bytes']} 字节")
+                            print(f"     类型: {doc['doc_type']}")
+                            print(f"     大小: {doc['size']} 字节")
                             print(f"     路径: {doc['file_path']}")
                             print()
                     continue

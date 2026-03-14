@@ -40,6 +40,7 @@ class KimiChatModel(BaseChatModel):
     )
     max_tokens: Optional[int] = Field(default=None, description="最大生成 token 数")
     tools: Optional[List[Dict[str, Any]]] = Field(default=None, description="绑定的工具列表")
+    request_timeout: float = Field(default=60.0, description="请求超时时间（秒）")
     
     # HTTP 客户端
     _http_client: Optional[httpx.AsyncClient] = None
@@ -62,7 +63,12 @@ class KimiChatModel(BaseChatModel):
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json"
                 },
-                timeout=60.0
+                timeout=httpx.Timeout(
+                    connect=10.0,      # 连接超时
+                    read=self.request_timeout,  # 读取超时（可配置）
+                    write=10.0,        # 写入超时
+                    pool=10.0          # 连接池超时
+                )
             )
         return self._http_client
     
@@ -176,20 +182,31 @@ class KimiChatModel(BaseChatModel):
         payload.update(kwargs)
         
         # 🔥 使用 httpx 直接调用 Kimi API（支持 thinking 参数）
-        response = await self.http_client.post(
-            "/chat/completions",
-            json=payload
-        )
-        
-        if response.status_code != 200:
-            error_detail = response.text
-            print(f"[KimiChatModel] ❌ API 错误 ({response.status_code}): {error_detail}")
-            response.raise_for_status()
-        
-        response_data = response.json()
-        
-        # 解析响应（会保存 reasoning_content）
-        return self._create_chat_result(response_data)
+        try:
+            response = await self.http_client.post(
+                "/chat/completions",
+                json=payload
+            )
+            
+            if response.status_code != 200:
+                error_detail = response.text
+                print(f"[KimiChatModel] ❌ API 错误 ({response.status_code}): {error_detail}")
+                response.raise_for_status()
+            
+            response_data = response.json()
+            
+            # 解析响应（会保存 reasoning_content）
+            return self._create_chat_result(response_data)
+            
+        except httpx.ReadTimeout as e:
+            # 读取超时，可能是生成内容过长
+            raise TimeoutError(
+                f"请求超时（{self.request_timeout}秒）。"
+                f"生成内容可能过长，请尝试减少内容量或增加 request_timeout 参数。"
+            ) from e
+        except httpx.ConnectTimeout as e:
+            # 连接超时
+            raise ConnectionError("连接 Kimi API 超时，请检查网络连接") from e
     
     def _create_chat_result(self, response_data: Dict[str, Any]) -> ChatResult:
         """
@@ -249,6 +266,7 @@ def create_kimi_chat_model(
     base_url: Optional[str] = None,
     thinking: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
+    request_timeout: float = 60.0,
 ) -> KimiChatModel:
     """
     创建 Kimi ChatModel 实例
@@ -262,6 +280,7 @@ def create_kimi_chat_model(
                  {"type": "enabled", "budget_tokens": 8192} - 启用
                  None - 禁用（默认）
         max_tokens: 最大生成 token 数
+        request_timeout: 请求超时时间（秒），默认 60 秒（1 分钟）
     
     Returns:
         KimiChatModel 实例
@@ -270,11 +289,12 @@ def create_kimi_chat_model(
         >>> from config.settings import get_settings
         >>> llm_settings = get_settings().llm
         >>> 
-        >>> # 启用 thinking 模式
+        >>> # 启用 thinking 模式，设置超时时间
         >>> llm = create_kimi_chat_model(
         ...     api_key=llm_settings.api_key,
         ...     base_url=llm_settings.api_base,
-        ...     thinking={"type": "enabled", "budget_tokens": 8192}
+        ...     thinking={"type": "enabled", "budget_tokens": 8192},
+        ...     request_timeout=600.0  # 10 分钟超时（适合大文档生成）
         ... )
         >>> 
         >>> # 禁用 thinking 模式
@@ -298,4 +318,5 @@ def create_kimi_chat_model(
         base_url=base_url or "https://api.moonshot.cn/v1",
         thinking=thinking,
         max_tokens=max_tokens,
+        request_timeout=request_timeout,
     )

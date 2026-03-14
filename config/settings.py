@@ -25,6 +25,7 @@ class LLMSettings(BaseSettings):
     api_base: Optional[str] = None
     local_model: str = "qwen2.5:7b"
     use_local: bool = False
+    request_timeout: float = 60.0  # API 请求超时时间（秒）
     
     class Config:
         env_prefix = "LLM_"
@@ -34,10 +35,12 @@ class LLMSettings(BaseSettings):
         """从环境变量加载配置"""
         api_key = os.getenv("KIMI_API_KEY") or os.getenv("OPENAI_API_KEY")
         api_base = os.getenv("KIMI_API_BASE") or os.getenv("OPENAI_API_BASE") or "https://api.moonshot.cn/v1"
+        request_timeout = float(os.getenv("LLM_REQUEST_TIMEOUT", "60.0"))
         
         return cls(
             api_key=api_key,
-            api_base=api_base
+            api_base=api_base,
+            request_timeout=request_timeout
         )
 
 
