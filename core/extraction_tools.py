@@ -155,21 +155,23 @@ class ExtractionToolsManager:
                 # 从字典中提取信息
                 doc_id = doc_info['doc_id']
                 actual_filename = doc_info['filename']
+                file_path = doc_info['file_path']  # 获取绝对路径
                 
                 # 记录文档信息
                 manager.saved_documents.append({
                     'doc_id': doc_id,
                     'filename': actual_filename,
+                    'file_path': file_path,
                     'type': type.value,
                     'description': description,
                     'content': content,
                     'size': len(content)
                 })
                 
-                # 返回结果
-                result = f"✓ 文档已保存: {actual_filename}"
+                # 返回结果（包含绝对路径）
+                result = f"✓ 文档已保存\n📁 路径: {file_path}"
                 if actual_filename != filename:
-                    result += f"\n   ⚠️ 已重命名（原文件名存在）"
+                    result += f"\n⚠️ 已重命名: {filename} → {actual_filename}"
                 
                 return result
                 

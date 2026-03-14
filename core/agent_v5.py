@@ -95,6 +95,7 @@ class SimpleAgentV5:
 - 正常对话不需要调用任何工具
 - **如果工具调用失败，不要重试！** 直接向用户说明情况即可
 - 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
+- 当生成或保存了 Python 代码后，可以使用 execute_python 工具运行它并验证结果
 
 记住：这些工具是辅助工具，主要任务是给用户提供有帮助的回复！"""
         
@@ -128,8 +129,13 @@ class SimpleAgentV5:
         web_tools = get_web_tools()
         print(f"✓ 成功加载 {len(web_tools)} 个网页浏览工具")
 
+        # 🐍 加载 Python 执行工具
+        from tools.python_executor import get_python_executor_tool
+        python_tools = get_python_executor_tool()
+        print(f"✓ 成功加载 {len(python_tools)} 个 Python 执行工具")
+
         # 组合所有工具
-        self.tools = extraction_tools + web_tools + mcp_tools
+        self.tools = extraction_tools + web_tools + python_tools + mcp_tools
         print(f"✓ 已注册 {len(extraction_tools)} 个提取工具")
         print(f"✓ 工具总数: {len(self.tools)} 个")
         
