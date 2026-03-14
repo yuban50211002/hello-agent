@@ -133,6 +133,51 @@ class TieredMemory:
         
         return cold_layer
     
+    def add_facts(self, facts: List[Dict[str, Any]]) -> int:
+        """
+        添加事实到记忆系统
+        
+        事实会被直接保存到冷层（向量数据库），便于长期检索
+        
+        Args:
+            facts: 事实列表，每个事实包含：
+                - content: 事实内容
+                - category: 分类（user_info/ai_identity/user_preference/user_skill）
+                - confidence: 置信度（high/medium/low）
+        
+        Returns:
+            保存的事实数量
+        """
+        if not facts:
+            return 0
+        
+        try:
+            # 准备向量化的文本和元数据
+            texts = []
+            metadatas = []
+            
+            for fact in facts:
+                texts.append(fact['content'])
+                metadatas.append({
+                    'type': 'fact',
+                    'category': fact['category'],
+                    'confidence': fact['confidence'],
+                    'timestamp': datetime.now().isoformat()
+                })
+            
+            # 🔥 保存到冷层（向量数据库）
+            self.cold_layer.add_texts(
+                texts=texts,
+                metadatas=metadatas
+            )
+            
+            print(f"✓ 保存了 {len(facts)} 个事实到记忆系统（冷层）")
+            return len(facts)
+            
+        except Exception as e:
+            print(f"⚠️ 保存事实失败: {str(e)}")
+            return 0
+    
     def add_conversation(self, user_msg: str, ai_msg: str, metadata: Dict[str, Any] = None):
         """
         添加一轮对话
@@ -140,7 +185,7 @@ class TieredMemory:
         Args:
             user_msg: 用户消息
             ai_msg: AI 回复
-            metadata: 元数据
+            metadata: 元数据（可包含 extracted_facts）
         """
         # 1. 创建对话记录
         turn = ConversationTurn(
@@ -158,11 +203,16 @@ class TieredMemory:
         
         print(f"✓ 添加到热层: {len(self.hot_conversations)} 轮对话")
         
-        # 3. 检查是否需要淘汰到温层
+        # 3. 如果 metadata 中包含事实，保存到冷层
+        if metadata and 'extracted_facts' in metadata:
+            facts = metadata['extracted_facts']
+            self.add_facts(facts)
+        
+        # 4. 检查是否需要淘汰到温层
         if len(self.hot_conversations) > self.hot_layer_size:
             self._move_hot_to_warm()
         
-        # 4. 保存数据
+        # 5. 保存数据
         self._save_persistent_data()
     
     def add_conversation_with_document(
@@ -346,6 +396,64 @@ class TieredMemory:
             source_turn_ids=[t.turn_id for t in turns]
         )
     
+    def retrieve_facts(
+        self,
+        query: Optional[str] = None,
+        category: Optional[str] = None,
+        k: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        检索事实
+        
+        Args:
+            query: 查询文本（用于语义搜索），如果为 None 则返回所有事实
+            category: 事实分类过滤（user_info/ai_identity/user_preference/user_skill）
+            k: 返回数量
+        
+        Returns:
+            事实列表
+        """
+        try:
+            if self.cold_layer._collection.count() == 0:
+                return []
+            
+            if query:
+                # 语义搜索
+                results = self.cold_layer.similarity_search(
+                    query,
+                    k=k * 2,  # 多取一些，方便过滤
+                    filter={'type': 'fact'} if not category else {'type': 'fact', 'category': category}
+                )
+            else:
+                # 获取所有事实
+                results = self.cold_layer.get(
+                    where={'type': 'fact'} if not category else {'type': 'fact', 'category': category},
+                    limit=k
+                )
+                # 转换格式
+                if isinstance(results, dict) and 'documents' in results:
+                    from langchain_core.documents import Document
+                    results = [
+                        Document(page_content=doc, metadata=meta)
+                        for doc, meta in zip(results['documents'], results.get('metadatas', []))
+                    ]
+            
+            # 提取事实信息
+            facts = []
+            for doc in results[:k]:
+                facts.append({
+                    'content': doc.page_content,
+                    'category': doc.metadata.get('category', 'unknown'),
+                    'confidence': doc.metadata.get('confidence', 'unknown'),
+                    'timestamp': doc.metadata.get('timestamp', 'unknown')
+                })
+            
+            return facts
+            
+        except Exception as e:
+            print(f"⚠️ 检索事实失败: {str(e)}")
+            return []
+    
     def retrieve_context(
         self,
         query: str,
@@ -409,8 +517,13 @@ class TieredMemory:
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
         cold_count = 0
+        facts_count = 0
         try:
             cold_count = self.cold_layer._collection.count()
+            # 统计事实数量
+            fact_results = self.cold_layer.get(where={'type': 'fact'})
+            if isinstance(fact_results, dict) and 'documents' in fact_results:
+                facts_count = len(fact_results['documents'])
         except:
             pass
         
@@ -420,6 +533,7 @@ class TieredMemory:
             "热层对话数": len(self.hot_conversations),
             "温层摘要数": len(self.warm_layer),
             "冷层记录数": cold_count,
+            "事实总数": facts_count,
             "总记忆容量": len(self.hot_conversations) + len(self.warm_layer) + cold_count,
             "文档总数": doc_stats["total_documents"],
             "文档总大小(MB)": doc_stats["total_size_mb"]

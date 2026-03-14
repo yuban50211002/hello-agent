@@ -13,11 +13,12 @@ import asyncio
 import sys
 from pathlib import Path
 
+from core.agent_v5 import SimpleAgentV5
+
 # 添加项目根目录到 Python 路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from core.agent import SimpleAgent
 from config.settings import get_settings
 
 def main():
@@ -40,15 +41,13 @@ async def main_async():
         print(f"   记忆状态: {'启用' if settings.memory.enable else '禁用'}")
         print(f"   嵌入模型: {settings.memory.embedding_provider}")
         print(f"   摘要生成: LLM 智能摘要")
+        print(f"   输出模式: 可选工具（兼容 thinking 模式）")
         print()
         
-        # 初始化 Agent（使用分级记忆）
-        agent = SimpleAgent(
+        # 🔥 初始化 Agent V5（可选工具模式）
+        agent = SimpleAgentV5(
             model_name=settings.llm.model_name,
-            temperature=settings.llm.temperature,
-            enable_memory=settings.memory.enable,
             memory_path=settings.memory.persist_path,
-            local_extraction_model="qwen2.5:7b"  # 千问模型
         )
         
         # 异步初始化（加载 MCP 工具）
