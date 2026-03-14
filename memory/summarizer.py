@@ -1,21 +1,32 @@
 """
-对话摘要生成工具（基于 TF-IDF）
+对话摘要生成工具 - TextRank 算法
 
-简洁版本：只保留核心的 TF-IDF 句子提取和关键词提取
+使用 TextRank（基于图的排序算法）提取关键句子和关键词
+相比 TF-IDF，TextRank 考虑句子之间的相似度关系，提取质量更高
 """
 
 import jieba
 import jieba.analyse
 from typing import List, Dict, Tuple
 from collections import defaultdict
+import numpy as np
 import re
 
 
 class ConversationSummarizer:
-    """对话摘要生成器（简化版）"""
+    """对话摘要生成器（TextRank 算法）"""
     
-    def __init__(self):
-        """初始化分词器，添加技术术语"""
+    def __init__(self, damping=0.85, tolerance=0.0001):
+        """
+        初始化
+        
+        Args:
+            damping: 阻尼系数（类似 PageRank，通常设为 0.85）
+            tolerance: 收敛阈值
+        """
+        self.damping = damping
+        self.tolerance = tolerance
+        
         # 添加常见技术术语到分词器
         tech_words = [
             'Agent', 'LLM', 'LangChain', 'API', 'Python', 'JSON',
@@ -56,19 +67,19 @@ class ConversationSummarizer:
         # 2. 分句
         sentences = self._split_sentences(all_text)
         
-        # 3. 计算句子权重（TF-IDF）
-        sentence_weights = self._calculate_sentence_weights(sentences)
+        if not sentences:
+            return self._empty_summary()
         
-        # 4. 提取关键句子
-        key_sentences = self._generate_summary(sentence_weights, top_sentences)
+        # 3. 使用 TextRank 提取关键句子
+        key_sentences = self._textrank_sentences(sentences, top_sentences)
         
-        # 5. 提取关键词
-        keywords = jieba.analyse.extract_tags(all_text, topK=top_keywords)
+        # 4. 提取关键词（使用 jieba 的 TextRank 实现）
+        keywords = jieba.analyse.textrank(all_text, topK=top_keywords)
         
-        # 6. 生成一句话摘要
+        # 5. 生成一句话摘要
         summary = self._generate_one_line_summary(conversations, key_sentences)
         
-        # 7. 评估重要性
+        # 6. 评估重要性
         importance = self._calculate_importance(conversations, len(keywords))
         
         return {
@@ -85,38 +96,96 @@ class ConversationSummarizer:
         sentences = [s.strip() for s in sentences if s.strip() and len(s) > 3]
         return sentences
     
-    def _calculate_sentence_weights(self, sentences: List[str]) -> Dict[str, float]:
-        """计算句子的 TF-IDF 权重"""
-        sentence_weights = defaultdict(float)
-        for sentence in sentences:
-            # 使用 jieba 的 TF-IDF 提取关键词及权重
-            keywords = jieba.analyse.extract_tags(
-                sentence,
-                topK=10,
-                withWeight=True
-            )
-            # 累加句子的权重
-            for word, weight in keywords:
-                sentence_weights[sentence] += weight
-        return sentence_weights
+    def _textrank_sentences(self, sentences: List[str], top_n: int) -> List[str]:
+        """
+        使用 TextRank 算法提取关键句子
+        
+        Args:
+            sentences: 句子列表
+            top_n: 返回句子数量
+        
+        Returns:
+            关键句子列表（按原文顺序）
+        """
+        n = len(sentences)
+        
+        if n <= top_n:
+            return sentences
+        
+        # 1. 构建句子相似度矩阵
+        similarity_matrix = self._build_similarity_matrix(sentences)
+        
+        # 2. 运行 TextRank 算法
+        scores = self._run_textrank(similarity_matrix)
+        
+        # 3. 选择得分最高的 top_n 个句子
+        ranked_indices = np.argsort(scores)[-top_n:][::-1]
+        
+        # 4. 按原文顺序返回
+        ranked_indices = sorted(ranked_indices)
+        return [sentences[i] for i in ranked_indices]
     
-    def _generate_summary(
-        self,
-        sentence_weights: Dict[str, float],
-        top_n: int = 3
-    ) -> List[str]:
-        """生成摘要（选择权重最高的句子）"""
-        # 按权重排序
-        sorted_sentences = sorted(
-            sentence_weights.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
-        # 提取前 top_n 个句子
-        summary_sentences = [sentence for sentence, weight in sorted_sentences[:top_n]]
-        # 去重
-        unique_summary = list(dict.fromkeys(summary_sentences))
-        return unique_summary
+    def _build_similarity_matrix(self, sentences: List[str]) -> np.ndarray:
+        """
+        构建句子相似度矩阵
+        
+        使用余弦相似度计算句子之间的相似度
+        """
+        n = len(sentences)
+        matrix = np.zeros((n, n))
+        
+        # 对每个句子分词
+        words_list = [set(jieba.cut(s)) for s in sentences]
+        
+        # 计算每对句子的相似度
+        for i in range(n):
+            for j in range(i + 1, n):
+                # 计算交集
+                intersection = words_list[i] & words_list[j]
+                
+                if not intersection:
+                    continue
+                
+                # 余弦相似度
+                similarity = len(intersection) / (
+                    np.sqrt(len(words_list[i])) * np.sqrt(len(words_list[j]))
+                )
+                
+                matrix[i][j] = similarity
+                matrix[j][i] = similarity
+        
+        return matrix
+    
+    def _run_textrank(self, similarity_matrix: np.ndarray) -> np.ndarray:
+        """
+        运行 TextRank 算法
+        
+        类似 PageRank，通过迭代计算每个句子的重要性分数
+        """
+        n = len(similarity_matrix)
+        scores = np.ones(n) / n  # 初始化为均匀分布
+        
+        # 迭代计算
+        for iteration in range(100):  # 最多迭代 100 次
+            prev_scores = scores.copy()
+            
+            for i in range(n):
+                rank_sum = 0
+                for j in range(n):
+                    if i != j and similarity_matrix[i][j] > 0:
+                        # 归一化：similarity[i][j] / sum(similarity[j])
+                        total = similarity_matrix[j].sum()
+                        if total > 0:
+                            rank_sum += (similarity_matrix[i][j] / total) * prev_scores[j]
+                
+                # TextRank 公式：(1-d) + d * sum(...)
+                scores[i] = (1 - self.damping) + self.damping * rank_sum
+            
+            # 检查收敛
+            if np.abs(scores - prev_scores).sum() < self.tolerance:
+                break
+        
+        return scores
     
     def _generate_one_line_summary(
         self,
@@ -157,6 +226,16 @@ class ConversationSummarizer:
         score += min(total_len / 2000, 0.15)
         
         return min(score, 1.0)
+    
+    def _empty_summary(self) -> Dict:
+        """返回空摘要"""
+        return {
+            'summary': "空对话",
+            'key_points': [],
+            'entities': [],
+            'topics': [],
+            'importance': 0.0
+        }
 
 
 # 单例模式（避免重复初始化）

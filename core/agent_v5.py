@@ -89,22 +89,12 @@ class SimpleAgentV5:
 
 {memory_context}
 
-**可用工具**：
-
-1. **extract_facts**: 提取对话中的重要事实
-   - 当用户提供需要长期记住的信息时使用（名字、工作、偏好、技能等）
-   - 简单问候（"你好"、"谢谢"）不需要调用
-   - 示例：用户说"我叫张三"，调用 extract_facts 提取这个事实
-
-2. **save_document**: 保存生成的文档
-   - 当你创建代码、配置文件、文档等需要保存的内容时使用
-   - 示例：用户说"写一个 Python Hello World"，创建代码后调用 save_document
-
 **重要规则**：
-- 这些工具是**可选的**，根据实际需要决定是否调用
-- 可以只调用其中一个，或两个都调用，或都不调用
+- MCP工具是**可选的**，根据实际需要决定是否调用
+- 可以只调用其中一个，或多个组合使用，或都不调用
 - 正常对话不需要调用任何工具
 - **如果工具调用失败，不要重试！** 直接向用户说明情况即可
+- 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
 
 记住：这些工具是辅助工具，主要任务是给用户提供有帮助的回复！"""
         
@@ -117,24 +107,29 @@ class SimpleAgentV5:
     async def initialize(self):
         """加载 MCP 工具并创建 Agent"""
         print("⏳ 正在加载 MCP 工具...")
-        
+
         try:
             loader = mcp_loader.McpLoader(config_file=self._mcp_config.config_file)
             mcp_tools = await loader.load_tools()
             print(f"✓ 成功加载 {len(mcp_tools)} 个 MCP 工具")
-            
+
         except Exception as e:
             print(f"⚠️  工具加载失败: {e}")
             mcp_tools = []
-        
+
         # 🔥 创建提取工具管理器（一次性创建）
         self.extraction_manager = ExtractionToolsManager(
             memory=self.memory if self.enable_memory else None
         )
         extraction_tools = self.extraction_manager.get_tools()
         
+        # 🌐 加载网页浏览工具
+        from tools.web_tools import get_web_tools
+        web_tools = get_web_tools()
+        print(f"✓ 成功加载 {len(web_tools)} 个网页浏览工具")
+
         # 组合所有工具
-        self.tools = extraction_tools + mcp_tools
+        self.tools = extraction_tools + web_tools + mcp_tools
         print(f"✓ 已注册 {len(extraction_tools)} 个提取工具")
         print(f"✓ 工具总数: {len(self.tools)} 个")
         

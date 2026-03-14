@@ -29,6 +29,11 @@ langchain-ollama = "^1.0.1"
 langchain-chroma = "^1.1.0"
 tiktoken = "^0.7.0"
 jieba = "^0.42.1"
+httpx = "^0.28.1"
+beautifulsoup4 = "^4.14.3"
+lxml = "^6.0.2"
+trafilatura = "^2.0.0"
+ddgs = "^9.11.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
