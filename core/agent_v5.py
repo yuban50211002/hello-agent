@@ -79,10 +79,10 @@ class SimpleAgentV5:
                 persist_path=memory_path or "./data/tiered_memory",
                 hot_layer_size=10,
                 warm_layer_size=50,
-                embedding_model="nomic-embed-text",
-                llm=self.llm
+                embedding_model="nomic-embed-text"
+                # 不再传递 llm，使用 TF-IDF 生成摘要
             )
-            print("✓ 已启用分级记忆系统")
+            print("✓ 已启用分级记忆系统（TF-IDF 摘要）")
 
         # System Prompt（简洁版）
         self.system_prompt = """你是一个智能助手，可以帮助用户完成各种任务。
@@ -105,37 +105,6 @@ class SimpleAgentV5:
 - 可以只调用其中一个，或两个都调用，或都不调用
 - 正常对话不需要调用任何工具
 - **如果工具调用失败，不要重试！** 直接向用户说明情况即可
-
-**示例**：
-
-1. 普通对话（不调用工具）：
-   用户："你好"
-   你："你好！我是 AI 助手，很高兴为你服务。"
-   （不需要调用任何工具）
-
-2. 提取事实（调用 extract_facts）：
-   用户："我叫张三，是 Python 开发者"
-   你：先回复"你好张三！很高兴认识一位 Python 开发者。"
-      然后调用 extract_facts([
-        {"content": "用户名字是张三", "category": "user_info", "confidence": "high"},
-        {"content": "用户是 Python 开发者", "category": "user_skill", "confidence": "high"}
-      ])
-
-3. 保存文档（调用 save_document）：
-   用户："写一个 Python Hello World"
-   你：先回复"好的！我为你创建了一个 Python Hello World 程序。"
-      然后调用 save_document({
-        "filename": "hello.py",
-        "type": "python",
-        "description": "简单的 Hello World 程序",
-        "content": "print('Hello, World!')"
-      })
-
-4. 同时提取事实和保存文档：
-   用户："我叫张三，帮我写个快速排序"
-   你：先回复"好的张三！我为你创建了一个快速排序算法。"
-      然后调用 extract_facts([{"content": "用户名字是张三", ...}])
-      再调用 save_document({"filename": "quicksort.py", ...})
 
 记住：这些工具是辅助工具，主要任务是给用户提供有帮助的回复！"""
         
@@ -195,6 +164,15 @@ class SimpleAgentV5:
             if self.extraction_manager:
                 self.extraction_manager.reset_context(query)
             
+            # 🔥 生成系统信息（每次请求时动态生成）
+            from datetime import datetime
+            import platform
+            
+            now = datetime.now()
+            weekday_names = ['一', '二', '三', '四', '五', '六', '日']
+            system_info = f"""- 当前时间: {now.strftime('%Y年%m月%d日 %H:%M')} 星期{weekday_names[now.weekday()]}
+- 运行环境: {platform.system()} (Python {platform.python_version()})"""
+            
             # 获取记忆上下文
             memory_context = ""
 
@@ -211,13 +189,19 @@ class SimpleAgentV5:
                 "{memory_context}",
                 memory_context if memory_context else "暂无历史记忆。"
             )
+            
+            # 🔥 在 prompt 开头添加系统信息
+            final_prompt = f"""**系统信息**：
+{system_info}
+
+{prompt_with_memory}"""
 
             # 🔥 调用 Agent（使用新 API）
             # 限制递归深度，避免工具失败时无限重试
             result = await self.agent.ainvoke(
                 {
                     "messages": [
-                        SystemMessage(content=prompt_with_memory),
+                        SystemMessage(content=final_prompt),
                         ("user", query)
                     ]
                 },

@@ -73,7 +73,7 @@ class TieredMemory:
         hot_layer_size: int = 10,        # 热层保存最近 10 轮对话
         warm_layer_size: int = 50,       # 温层保存最多 50 个摘要
         embedding_model: str = "nomic-embed-text",
-        llm = None  # 用于生成摘要的 LLM
+        llm = None  # 保留以兼容旧代码，但不再使用
     ):
         """
         初始化分级记忆系统
@@ -83,14 +83,14 @@ class TieredMemory:
             hot_layer_size: 热层大小（对话轮数）
             warm_layer_size: 温层大小（摘要数量）
             embedding_model: 嵌入模型
-            llm: 语言模型（用于生成摘要）
+            llm: （已弃用）现在只使用 TF-IDF 生成摘要
         """
         self.persist_path = Path(persist_path)
         self.persist_path.mkdir(parents=True, exist_ok=True)
         
         self.hot_layer_size = hot_layer_size
         self.warm_layer_size = warm_layer_size
-        self.llm = llm
+        self.llm = llm  # 保留字段以兼容旧代码
         
         # 热层：当前对话历史（ChatMessageHistory）
         self.hot_layer = ChatMessageHistory()
@@ -111,7 +111,7 @@ class TieredMemory:
         # 加载持久化数据
         self._load_persistent_data()
         
-        print(f"✓ 分级记忆系统初始化完成")
+        print(f"✓ 分级记忆系统初始化完成（使用 TF-IDF 摘要）")
         print(f"  - 热层容量: {self.hot_layer_size} 轮对话")
         print(f"  - 温层容量: {self.warm_layer_size} 个摘要")
         print(f"  - 冷层: ChromaDB 向量存储")
@@ -274,18 +274,18 @@ class TieredMemory:
         return doc_info
     
     def _move_hot_to_warm(self):
-        """将热层数据移动到温层（生成摘要）"""
+        """将热层数据移动到温层（使用 TF-IDF 生成摘要）"""
         # 取出最旧的对话
         old_turns = self.hot_conversations[:self.hot_layer_size // 2]
         self.hot_conversations = self.hot_conversations[self.hot_layer_size // 2:]
         
         print(f"📊 热层溢出，移动 {len(old_turns)} 轮对话到温层")
         
-        # 生成摘要
-        summary = self._generate_summary(old_turns)
+        # 使用 TF-IDF 生成摘要
+        summary = self._generate_summary_simple(old_turns)
         self.warm_layer.append(summary)
         
-        print(f"✓ 生成摘要: {summary.summary[:50]}...")
+        print(f"✓ TF-IDF 摘要已生成: {summary.summary[:50]}...")
         
         # 检查温层是否需要淘汰
         if len(self.warm_layer) > self.warm_layer_size:
@@ -317,7 +317,7 @@ class TieredMemory:
     
     def _generate_summary(self, turns: List[ConversationTurn]) -> MemorySummary:
         """
-        生成对话摘要
+        生成对话摘要（使用 TF-IDF）
         
         Args:
             turns: 对话轮次列表
@@ -325,21 +325,8 @@ class TieredMemory:
         Returns:
             记忆摘要
         """
-        # 如果有 LLM，使用 LLM 生成摘要
-        if self.llm:
-            return self._generate_summary_with_llm(turns)
-        else:
-            return self._generate_summary_simple(turns)
-    
-    def _generate_summary_with_llm(self, turns: List[ConversationTurn]) -> MemorySummary:
-        """使用 LLM 生成智能摘要"""
-        # 构建对话文本
-        conversation_text = "\n\n".join([
-            f"用户: {turn.user_message}\nAI: {turn.ai_message}"
-            for turn in turns
-        ])
-        
-        # 调用 LLM 生成摘要
+        # 只使用 TF-IDF 生成摘要
+        return self._generate_summary_simple(turns)
         prompt = f"""请为以下对话生成摘要，提取关键信息：
 
 {conversation_text}
@@ -375,23 +362,49 @@ class TieredMemory:
         return self._generate_summary_simple(turns)
     
     def _generate_summary_simple(self, turns: List[ConversationTurn]) -> MemorySummary:
-        """生成简单摘要（不使用 LLM）"""
-        # 简单提取关键词
-        all_text = " ".join([
-            f"{turn.user_message} {turn.ai_message}"
-            for turn in turns
-        ])
+        """
+        生成简单摘要（不使用 LLM，使用 TF-IDF）
         
-        # 简单的关键词提取（基于长度和频率）
-        words = all_text.split()
-        key_words = [w for w in words if len(w) > 3][:10]
+        Args:
+            turns: 对话轮次列表
+        
+        Returns:
+            记忆摘要
+        """
+        if not turns:
+            return MemorySummary(
+                summary="空对话",
+                key_points=[],
+                entities=[],
+                topics=[],
+                importance=0.0,
+                timestamp=datetime.now().isoformat(),
+                source_turn_ids=[]
+            )
+        
+        # 使用 TF-IDF 摘要器
+        from memory.summarizer import get_summarizer
+        summarizer = get_summarizer()
+        
+        # 转换为 (user_msg, ai_msg) 格式
+        conversations = [
+            (turn.user_message, turn.ai_message)
+            for turn in turns
+        ]
+        
+        # 生成摘要
+        result = summarizer.summarize(
+            conversations,
+            top_sentences=3,
+            top_keywords=5
+        )
         
         return MemorySummary(
-            summary=f"包含 {len(turns)} 轮对话的记忆片段",
-            key_points=key_words[:5],
-            entities=[],
-            topics=[],
-            importance=0.5,
+            summary=result['summary'],
+            key_points=result['key_points'],
+            entities=result['entities'],
+            topics=result['topics'],
+            importance=result['importance'],
             timestamp=datetime.now().isoformat(),
             source_turn_ids=[t.turn_id for t in turns]
         )
