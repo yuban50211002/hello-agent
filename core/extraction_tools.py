@@ -140,9 +140,8 @@ class ExtractionToolsManager:
                 return f"⚠️ 记忆系统未启用"
             
             try:
-                from memory.document_manager import DocumentManager
-                
-                doc_manager = DocumentManager()
+                # 使用 memory 中的 doc_manager，而不是创建新的
+                doc_manager = manager.memory.doc_manager
                 
                 # 保存文件（返回的是字典）
                 doc_info = doc_manager.save_document(

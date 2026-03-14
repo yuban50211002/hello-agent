@@ -87,7 +87,7 @@ class DocumentManager:
         doc_info = {
             "doc_id": doc_id,
             "filename": filename,
-            "file_path": str(file_path),
+            "file_path": str(file_path.resolve()),  # 转换为绝对路径
             "doc_type": doc_type,
             "size": len(content),
             "created_at": datetime.now().isoformat(),
@@ -100,11 +100,6 @@ class DocumentManager:
         # 保存元数据
         self.metadata[doc_id] = doc_info
         self._save_metadata()
-        
-        print(f"✓ 文档已保存: {filename}")
-        print(f"  - 文档 ID: {doc_id}")
-        print(f"  - 文件大小: {len(content)} 字符")
-        print(f"  - 路径: {file_path}")
         
         return doc_info
     
