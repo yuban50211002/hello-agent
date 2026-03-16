@@ -207,7 +207,7 @@ class SimpleAgentV5:
                     ]
                 },
                 config={
-                    "recursion_limit": 10  # 🔥 最多 5 次递归（包含工具调用）
+                    "recursion_limit": 20  # 🔥 最多 5 次递归（包含工具调用）
                 }
             )
             

@@ -83,7 +83,6 @@ class TieredMemory:
             hot_layer_size: 热层大小（对话轮数）
             warm_layer_size: 温层大小（摘要数量）
             embedding_model: 嵌入模型
-            llm: （已弃用）现在只使用 TF-IDF 生成摘要
         """
         self.persist_path = Path(persist_path)
         self.persist_path.mkdir(parents=True, exist_ok=True)
@@ -111,7 +110,7 @@ class TieredMemory:
         # 加载持久化数据
         self._load_persistent_data()
         
-        print(f"✓ 分级记忆系统初始化完成（使用 TF-IDF 摘要）")
+        print(f"✓ 分级记忆系统初始化完成")
         print(f"  - 热层容量: {self.hot_layer_size} 轮对话")
         print(f"  - 温层容量: {self.warm_layer_size} 个摘要")
         print(f"  - 冷层: ChromaDB 向量存储")
@@ -274,18 +273,27 @@ class TieredMemory:
         return doc_info
     
     def _move_hot_to_warm(self):
-        """将热层数据移动到温层（使用 TF-IDF 生成摘要）"""
+        """
+        将热层数据移动到温层
+        
+        流程：
+        1. 对每轮对话剔除 markdown 元素
+        2. 对每轮对话生成单独的摘要
+        3. 合并所有摘要并评估整体重要性
+        """
         # 取出最旧的对话
         old_turns = self.hot_conversations[:self.hot_layer_size // 2]
         self.hot_conversations = self.hot_conversations[self.hot_layer_size // 2:]
         
         print(f"📊 热层溢出，移动 {len(old_turns)} 轮对话到温层")
         
-        # 使用 TF-IDF 生成摘要
-        summary = self._generate_summary_simple(old_turns)
+        # 生成摘要（按新流程）
+        summary = self._generate_summary_per_turn(old_turns)
         self.warm_layer.append(summary)
         
-        print(f"✓ TF-IDF 摘要已生成: {summary.summary[:50]}...")
+        print(f"✓ 摘要已生成: {summary.summary[:50]}...")
+        print(f"  - 重要性: {summary.importance:.2f}")
+        print(f"  - 关键点数: {len(summary.key_points)}")
         
         # 检查温层是否需要淘汰
         if len(self.warm_layer) > self.warm_layer_size:
@@ -317,7 +325,7 @@ class TieredMemory:
     
     def _generate_summary(self, turns: List[ConversationTurn]) -> MemorySummary:
         """
-        生成对话摘要（使用 TF-IDF）
+        生成对话摘要
         
         Args:
             turns: 对话轮次列表
@@ -325,7 +333,6 @@ class TieredMemory:
         Returns:
             记忆摘要
         """
-        # 只使用 TF-IDF 生成摘要
         return self._generate_summary_simple(turns)
         prompt = f"""请为以下对话生成摘要，提取关键信息：
 
@@ -361,9 +368,127 @@ class TieredMemory:
         
         return self._generate_summary_simple(turns)
     
+    def _generate_summary_per_turn(self, turns: List[ConversationTurn]) -> MemorySummary:
+        """
+        按轮次生成摘要（新流程）
+        
+        流程：
+        1. 对每轮对话剔除 markdown 元素
+        2. 对每轮对话生成单独的摘要
+        3. 合并所有摘要并评估整体重要性
+        
+        Args:
+            turns: 对话轮次列表
+        
+        Returns:
+            合并后的记忆摘要
+        """
+        if not turns:
+            return MemorySummary(
+                summary="空对话",
+                key_points=[],
+                entities=[],
+                topics=[],
+                importance=0.0,
+                timestamp=datetime.now().isoformat(),
+                source_turn_ids=[]
+            )
+        
+        from memory.summarizer import get_summarizer
+        summarizer = get_summarizer()
+        
+        # 1. 对每轮对话剔除 markdown 元素并生成摘要
+        turn_summaries = []
+        all_key_points = []
+        all_keywords = set()
+        
+        print(f"  📝 开始逐轮摘要（共 {len(turns)} 轮）...")
+        
+        for i, turn in enumerate(turns, 1):
+            # 剔除 markdown 元素
+            cleaned_user = self._clean_markdown(turn.user_message)
+            cleaned_ai = self._clean_markdown(turn.ai_message)
+            
+            # 生成单轮摘要
+            single_turn_result = summarizer.summarize(
+                conversations=[(cleaned_user, cleaned_ai)],
+                top_sentences=2,  # 每轮提取 2 个关键句子
+                top_keywords=3    # 每轮提取 3 个关键词
+            )
+            
+            turn_summaries.append(single_turn_result['summary'])
+            all_key_points.extend(single_turn_result['key_points'])
+            all_keywords.update(single_turn_result.get('keywords', []))
+            
+            print(f"    轮 {i}: {single_turn_result['summary'][:40]}... (重要性: {single_turn_result['importance']:.2f})")
+        
+        # 2. 合并摘要
+        # 使用第一轮的摘要作为主摘要（通常最重要）
+        merged_summary = turn_summaries[0] if turn_summaries else "对话摘要"
+        
+        # 3. 去重关键点（保留前 5 个最重要的）
+        unique_key_points = []
+        seen = set()
+        for point in all_key_points:
+            point_normalized = point.strip()
+            if point_normalized and point_normalized not in seen:
+                unique_key_points.append(point_normalized)
+                seen.add(point_normalized)
+                if len(unique_key_points) >= 5:
+                    break
+        
+        # 4. 评估整体重要性
+        # 将所有清理后的对话传给摘要器进行整体评估
+        all_cleaned_conversations = [
+            (self._clean_markdown(turn.user_message), self._clean_markdown(turn.ai_message))
+            for turn in turns
+        ]
+        
+        overall_result = summarizer.summarize(
+            conversations=all_cleaned_conversations,
+            top_sentences=3,
+            top_keywords=5
+        )
+        
+        overall_importance = overall_result['importance']
+        
+        print(f"  ✓ 合并完成: 提取 {len(unique_key_points)} 个关键点, {len(all_keywords)} 个关键词")
+        print(f"  ✓ 整体重要性: {overall_importance:.2f}")
+        
+        return MemorySummary(
+            summary=merged_summary,
+            key_points=unique_key_points,
+            entities=[],  # 简化版不提取实体
+            topics=list(all_keywords)[:5],  # 使用关键词作为话题
+            importance=overall_importance,
+            timestamp=datetime.now().isoformat(),
+            source_turn_ids=[t.turn_id for t in turns]
+        )
+    
+    def _clean_markdown(self, text: str) -> str:
+        """
+        清理 Markdown 元素
+        
+        使用 summarizer 中的清理逻辑
+        
+        Args:
+            text: 原始文本
+        
+        Returns:
+            清理后的文本
+        """
+        from memory.summarizer import get_summarizer
+        summarizer = get_summarizer()
+        
+        # 使用 summarizer 的分句方法（会自动清理 markdown）
+        sentences = summarizer._split_sentences(text)
+        
+        # 重新组合为文本
+        return " ".join(sentences)
+    
     def _generate_summary_simple(self, turns: List[ConversationTurn]) -> MemorySummary:
         """
-        生成简单摘要（不使用 LLM，使用 TF-IDF）
+        生成简单摘要
         
         Args:
             turns: 对话轮次列表
@@ -382,7 +507,7 @@ class TieredMemory:
                 source_turn_ids=[]
             )
         
-        # 使用 TF-IDF 摘要器
+        # 使用摘要器
         from memory.summarizer import get_summarizer
         summarizer = get_summarizer()
         
