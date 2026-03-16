@@ -6,6 +6,8 @@
 """
 
 from typing import Any, Dict, Optional
+from typing_extensions import override
+
 from langchain.agents.middleware import AgentMiddleware, AgentState
 from langgraph.runtime import Runtime
 from langchain_core.messages import AIMessage, HumanMessage
@@ -13,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from memory.tiered_memory import TieredMemory
 
 
-class TieredMemoryMiddleware(AgentMiddleware):
+class TieredMemoryMiddleware(AgentMiddleware[AgentState, None]):
     """
     三层记忆中间件
     
@@ -22,7 +24,7 @@ class TieredMemoryMiddleware(AgentMiddleware):
     - 自动触发热层到温层的迁移
     - 自动触发温层到冷层的迁移
     - 在模型调用前注入记忆上下文
-    
+
     三层架构：
     - 热层（Hot Layer）：最近的对话，完整保留
     - 温层（Warm Layer）：摘要记忆，结构化存储
@@ -35,10 +37,6 @@ class TieredMemoryMiddleware(AgentMiddleware):
         hot_layer_size: int = 10,
         warm_layer_size: int = 50,
         embedding_model: str = "nomic-embed-text",
-        enable_context_injection: bool = True,
-        context_hot_size: int = 5,
-        context_warm_size: int = 3,
-        context_cold_size: int = 2,
     ):
         """
         初始化三层记忆中间件
@@ -48,10 +46,6 @@ class TieredMemoryMiddleware(AgentMiddleware):
             hot_layer_size: 热层大小（对话轮数）
             warm_layer_size: 温层大小（摘要数量）
             embedding_model: 嵌入模型
-            enable_context_injection: 是否在模型调用前注入记忆上下文
-            context_hot_size: 注入的热层消息数量
-            context_warm_size: 注入的温层摘要数量
-            context_cold_size: 注入的冷层记录数量
         """
         super().__init__()
         
@@ -62,23 +56,15 @@ class TieredMemoryMiddleware(AgentMiddleware):
             warm_layer_size=warm_layer_size,
             embedding_model=embedding_model,
         )
-        
-        # 配置
-        self.enable_context_injection = enable_context_injection
-        self.context_hot_size = context_hot_size
-        self.context_warm_size = context_warm_size
-        self.context_cold_size = context_cold_size
-        
-        # 当前轮次的临时存储
+        # 当前轮次的临时存储(用以持久化对话)
         self._current_user_message: Optional[str] = None
-        self._current_query: Optional[str] = None
-        
+
         print("✓ 三层记忆中间件已初始化")
         print(f"  - 热层容量: {hot_layer_size} 轮对话")
         print(f"  - 温层容量: {warm_layer_size} 个摘要")
         print(f"  - 冷层: ChromaDB 向量存储")
-        print(f"  - 上下文注入: {'启用' if enable_context_injection else '禁用'}")
-    
+
+    @override
     def before_agent(
         self,
         state: AgentState,
@@ -90,16 +76,16 @@ class TieredMemoryMiddleware(AgentMiddleware):
         提取用户消息，用于后续保存到记忆
         """
         messages = state.get("messages", [])
-        
+
         # 提取最后一个用户消息
         for msg in reversed(messages):
             if isinstance(msg, HumanMessage):
                 self._current_user_message = msg.content
-                self._current_query = msg.content
                 break
-        
+
         return None
-    
+
+    @override
     def before_model(
         self,
         state: AgentState,
@@ -110,29 +96,9 @@ class TieredMemoryMiddleware(AgentMiddleware):
         
         可选：注入记忆上下文到系统消息
         """
-        if not self.enable_context_injection or not self._current_query:
-            return None
-        
-        # 从三层记忆检索相关上下文
-        try:
-            memory_context = self.memory.retrieve_context(
-                query=self._current_query,
-                hot_layer_size=self.context_hot_size,
-                warm_layer_size=self.context_warm_size,
-                cold_layer_size=self.context_cold_size,
-            )
-            
-            if memory_context and memory_context != "（暂无相关记忆）":
-                # 将记忆上下文注入到消息中
-                # 注意：这里返回 None，因为我们不希望修改 state
-                # 实际的上下文注入应该在 wrap_model_call 中完成
-                pass
-        
-        except Exception as e:
-            print(f"⚠️ 记忆上下文检索失败: {e}")
-        
         return None
-    
+
+    @override
     def after_model(
         self,
         state: AgentState,
@@ -144,7 +110,8 @@ class TieredMemoryMiddleware(AgentMiddleware):
         暂不处理，等待 Agent 完成后统一保存
         """
         return None
-    
+
+    @override
     def after_agent(
         self,
         state: AgentState,
@@ -158,7 +125,7 @@ class TieredMemoryMiddleware(AgentMiddleware):
         if not self._current_user_message:
             return None
         
-        # 提取最后一个 AI 消息
+        # 提取最后一个消息
         messages = state.get("messages", [])
         ai_message = None
         
@@ -171,22 +138,10 @@ class TieredMemoryMiddleware(AgentMiddleware):
             return None
         
         try:
-            # 提取元数据（如果有）
-            metadata = {}
-            
-            # 检查是否有提取的事实
-            if hasattr(state, "extracted_facts"):
-                metadata["extracted_facts"] = state.get("extracted_facts")
-            
-            # 检查是否有保存的文档
-            if hasattr(state, "saved_documents"):
-                metadata["saved_documents"] = state.get("saved_documents")
-            
             # 保存到三层记忆
             self.memory.add_conversation(
                 user_msg=self._current_user_message,
                 ai_msg=ai_message,
-                metadata=metadata if metadata else None,
             )
             
             # 打印记忆统计
@@ -201,8 +156,7 @@ class TieredMemoryMiddleware(AgentMiddleware):
         finally:
             # 清理临时状态
             self._current_user_message = None
-            self._current_query = None
-        
+
         return None
     
     def get_memory_stats(self) -> Dict[str, Any]:
@@ -224,14 +178,6 @@ class TieredMemoryMiddleware(AgentMiddleware):
             k: 返回数量
         """
         return self.memory.retrieve_facts(query=query, category=category, k=k)
-    
-    def list_documents(self, limit: int = 10):
-        """列出最近的文档"""
-        return self.memory.list_documents(limit=limit)
-    
-    def get_document(self, doc_id: str):
-        """获取文档内容"""
-        return self.memory.get_document(doc_id)
     
     def clear_all(self):
         """清空所有记忆"""

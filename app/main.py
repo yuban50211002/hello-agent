@@ -37,11 +37,10 @@ async def main_async():
         print(f"📋 配置信息:")
         print(f"   项目: {settings.project_name} v{settings.version}")
         print(f"   LLM: {settings.llm.model_name}")
-        print(f"   记忆类型: 分级记忆（热层+温层+冷层）")
+        print(f"   记忆类型: 三层记忆中间件（自动管理）")
         print(f"   记忆状态: {'启用' if settings.memory.enable else '禁用'}")
         print(f"   嵌入模型: {settings.memory.embedding_provider}")
-        print(f"   摘要生成: LLM 智能摘要")
-        print(f"   输出模式: 可选工具（兼容 thinking 模式）")
+        print(f"   摘要生成: TextRank 算法")
         print()
         
         # 🔥 初始化 Agent V5（可选工具模式）

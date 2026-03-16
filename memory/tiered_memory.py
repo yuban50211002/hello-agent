@@ -102,11 +102,6 @@ class TieredMemory:
         self.embeddings = OllamaEmbeddings(model=embedding_model)
         self.cold_layer = self._init_cold_layer()
         
-        # 文档管理器
-        self.doc_manager = DocumentManager(
-            documents_dir=str(self.persist_path / "documents")
-        )
-        
         # 加载持久化数据
         self._load_persistent_data()
         
@@ -114,8 +109,7 @@ class TieredMemory:
         print(f"  - 热层容量: {self.hot_layer_size} 轮对话")
         print(f"  - 温层容量: {self.warm_layer_size} 个摘要")
         print(f"  - 冷层: ChromaDB 向量存储")
-        print(f"  - 文档管理: 启用")
-    
+
     def _init_cold_layer(self) -> Chroma:
         """初始化冷层（向量数据库）"""
         import chromadb
@@ -184,7 +178,6 @@ class TieredMemory:
         Args:
             user_msg: 用户消息
             ai_msg: AI 回复
-            metadata: 元数据（可包含 extracted_facts）
         """
         # 1. 创建对话记录
         turn = ConversationTurn(
@@ -201,76 +194,13 @@ class TieredMemory:
         self.hot_conversations.append(turn)
         
         print(f"✓ 添加到热层: {len(self.hot_conversations)} 轮对话")
-        
-        # 3. 如果 metadata 中包含事实，保存到冷层
-        if metadata and 'extracted_facts' in metadata:
-            facts = metadata['extracted_facts']
-            self.add_facts(facts)
-        
-        # 4. 检查是否需要淘汰到温层
+
+        # 3. 检查是否需要淘汰到温层
         if len(self.hot_conversations) > self.hot_layer_size:
             self._move_hot_to_warm()
         
         # 5. 保存数据
         self._save_persistent_data()
-    
-    def add_conversation_with_document(
-        self,
-        user_msg: str,
-        ai_msg_prefix: str,
-        document_content: str,
-        filename: str = None,
-        doc_type: str = "markdown",
-        metadata: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
-        """
-        添加对话并保存生成的文档（使用引用而不是存储完整内容）
-        
-        Args:
-            user_msg: 用户消息
-            ai_msg_prefix: AI 回复前缀（不包含文档内容）
-            document_content: 文档内容
-            filename: 文件名
-            doc_type: 文档类型
-            metadata: 元数据
-        
-        Returns:
-            文档信息
-        """
-        # 1. 创建对话 ID
-        turn_id = f"turn_{len(self.hot_conversations)}_{datetime.now().timestamp()}"
-        
-        # 2. 保存文档到文档管理器
-        doc_info = self.doc_manager.save_document(
-            content=document_content,
-            filename=filename,
-            doc_type=doc_type,
-            conversation_turn_id=turn_id,
-            user_query=user_msg,
-            metadata=metadata
-        )
-        
-        # 3. 构建 AI 回复（引用文档而不是包含完整内容）
-        ai_msg = f"{ai_msg_prefix}\n\n📄 文档已生成: {doc_info['filename']}\n"
-        ai_msg += f"- 文档 ID: {doc_info['doc_id'][:8]}...\n"
-        ai_msg += f"- 文件大小: {doc_info['size']} 字符\n"
-        ai_msg += f"- 保存路径: {doc_info['file_path']}\n"
-        ai_msg += f"\n摘要:\n{doc_info['summary']}"
-        
-        # 4. 添加对话（包含文档引用）
-        self.add_conversation(
-            user_msg=user_msg,
-            ai_msg=ai_msg,
-            metadata={
-                **(metadata or {}),
-                "generated_document": doc_info['doc_id'],
-                "document_path": doc_info['file_path']
-            }
-        )
-        
-        print(f"✓ 文档引用已添加到记忆")
-        
-        return doc_info
     
     def _move_hot_to_warm(self):
         """
@@ -646,7 +576,7 @@ class TieredMemory:
             except Exception as e:
                 print(f"⚠️ 冷层检索失败: {e}")
         
-        return "\n".join(context_parts) if context_parts else "（暂无相关记忆）"
+        return "\n".join(context_parts) if context_parts else ""
     
     def get_hot_layer_messages(self) -> List:
         """获取热层消息（用于 Agent）"""
@@ -664,43 +594,15 @@ class TieredMemory:
                 facts_count = len(fact_results['documents'])
         except:
             pass
-        
-        doc_stats = self.doc_manager.get_stats()
-        
+
         return {
             "热层对话数": len(self.hot_conversations),
             "温层摘要数": len(self.warm_layer),
             "冷层记录数": cold_count,
             "事实总数": facts_count,
             "总记忆容量": len(self.hot_conversations) + len(self.warm_layer) + cold_count,
-            "文档总数": doc_stats["total_documents"],
-            "文档总大小(MB)": doc_stats["total_size_mb"]
         }
-    
-    def get_document(self, doc_id: str) -> Optional[str]:
-        """
-        获取文档内容
-        
-        Args:
-            doc_id: 文档 ID
-        
-        Returns:
-            文档内容
-        """
-        return self.doc_manager.get_document(doc_id)
-    
-    def list_documents(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """
-        列出最近的文档
-        
-        Args:
-            limit: 限制数量
-        
-        Returns:
-            文档信息列表
-        """
-        return self.doc_manager.list_documents(limit=limit)
-    
+
     def _save_persistent_data(self):
         """保存持久化数据"""
         # 保存热层
