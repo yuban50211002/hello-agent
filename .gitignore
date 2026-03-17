@@ -25,6 +25,7 @@ logs/
 venv/
 env/
 ENV/
+workspace/
 
 # 数据文件
 data/

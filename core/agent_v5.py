@@ -19,6 +19,8 @@ from tools.mcp import loader as mcp_loader
 from core.extraction_tools import ExtractionToolsManager
 from langchain.chat_models.base import BaseChatModel
 from core.schemas import Fact, Document
+from langchain.agents.middleware import ShellToolMiddleware, DockerExecutionPolicy, RedactionRule, FilesystemFileSearchMiddleware
+
 
 from memory import TieredMemoryMiddleware
 
@@ -40,8 +42,11 @@ class SimpleAgentV5:
         self, 
         model_name: str = "kimi-k2.5", 
         temperature: float = 1.0,
-        memory_path: str = None
+        memory_path: str = None,
+        work_space: str = "./workspace"
     ):
+        # 工作目录
+        self.work_space = work_space
         # 获取 API 配置
         from config.settings import get_settings
         llm_settings = get_settings().llm
@@ -129,12 +134,37 @@ class SimpleAgentV5:
         self.tools = extraction_tools + web_tools + python_tools + mcp_tools
         print(f"✓ 已注册 {len(extraction_tools)} 个提取工具")
         print(f"✓ 工具总数: {len(self.tools)} 个")
-        
+
+        # shell tool 中间件
+        shell_middleware = ShellToolMiddleware(
+            # 工作目录
+            workspace_root=self.work_space,
+            # 启动命令
+            startup_commands=[],
+            # 关闭命令
+            shutdown_commands=[],
+            # # Docker 隔离
+            # execution_policy=DockerExecutionPolicy(
+            #     image="python:3.10-slim",
+            #     read_only_rootfs=True,
+            #     command_timeout=30,
+            #     max_output_bytes=1024 * 1024
+            # ),
+            # 脱敏规则
+            redaction_rules=[
+                RedactionRule(pii_type="user_phone", detector=r"\b1[3-9]\d{9}\b", strategy="mask"),
+            ],
+            # 自定义工具名称
+            tool_name="my_shell",
+            # 环境变量
+            env={}
+        )
+
         # 🔥 创建 Agent（集成中间件）
         self.agent = create_agent(
             model=self.llm,
             tools=self.tools,
-            middleware=[self.memory_middleware],
+            middleware=[self.memory_middleware, shell_middleware ],
             debug=True
         )
         
@@ -181,7 +211,7 @@ class SimpleAgentV5:
                     ]
                 },
                 config={
-                    "recursion_limit": 20
+                    "recursion_limit": 50 # 限制递归深度
                 }
             )
             
