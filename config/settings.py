@@ -19,7 +19,7 @@ DEFAULT_DATA_DIR = Path("./data/agent_memory")
 
 class LLMSettings(BaseSettings):
     """LLM 配置"""
-    model_name: str = "kimi-k2.5"
+    model_name: str = "kimi-k2.5" # "yhglm5"
     temperature: float = 1.0
     api_key: Optional[str] = None
     api_base: Optional[str] = None

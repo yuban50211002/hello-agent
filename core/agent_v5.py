@@ -19,8 +19,10 @@ from tools.mcp import loader as mcp_loader
 from core.extraction_tools import ExtractionToolsManager
 from langchain.chat_models.base import BaseChatModel
 from core.schemas import Fact, Document
-from langchain.agents.middleware import ShellToolMiddleware, DockerExecutionPolicy, RedactionRule, FilesystemFileSearchMiddleware
-
+from langchain.agents.middleware import ShellToolMiddleware, DockerExecutionPolicy, RedactionRule, HumanInTheLoopMiddleware
+from langchain.agents.middleware.human_in_the_loop import ApproveDecision, RejectDecision, EditDecision
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from memory import TieredMemoryMiddleware
 
@@ -100,6 +102,14 @@ class SimpleAgentV5:
 
         # 🔥 工具管理器（在 initialize() 中创建）
         self.extraction_manager = None
+
+        # 配置
+        self.config = {
+            "configurable": {
+                "thread_id": "1"   # 用于人机协作中间件
+            },
+            "recursion_limit": 50  # 限制递归深度
+        }
     
     async def initialize(self):
         """加载 MCP 工具并创建 Agent"""
@@ -160,12 +170,18 @@ class SimpleAgentV5:
             env={}
         )
 
+        # 人机协作中间件
+        human_middleware = HumanInTheLoopMiddleware(interrupt_on={
+            "execute_python": True
+        })
+
         # 🔥 创建 Agent（集成中间件）
         self.agent = create_agent(
             model=self.llm,
             tools=self.tools,
-            middleware=[self.memory_middleware, shell_middleware ],
-            debug=True
+            middleware=[self.memory_middleware, shell_middleware, human_middleware],
+            checkpointer=InMemorySaver(),
+            debug=True,
         )
         
         print("✓ Agent 已创建（集成三层记忆中间件）")
@@ -189,7 +205,7 @@ class SimpleAgentV5:
                         query=query,
                         hot_layer_size=5,
                         warm_layer_size=3,
-                        cold_layer_size=2
+                        cold_layer_size=3
                     )
                 except Exception as e:
                     print(f"⚠️ 记忆上下文检索失败: {e}")
@@ -210,11 +226,20 @@ class SimpleAgentV5:
                         ("user", query)
                     ]
                 },
-                config={
-                    "recursion_limit": 50 # 限制递归深度
-                }
+                config=self.config
             )
-            
+
+            # 人机协作
+            if "__interrupt__" in result:
+                last_interrupt = result['__interrupt__'][-1]
+                interrupt_id = last_interrupt.id
+                interrupt_value = last_interrupt.value
+                user_decision = input("\n操作已被拦截，请输入人机协作验证(approve/edit/reject)：")
+                result = await self.agent.ainvoke(
+                    Command(resume={"decisions": [{"type": user_decision}]}),
+                    config=self.config
+                )
+
             # 获取最终响应
             messages = result.get("messages", [])
             last_message = messages[-1]
