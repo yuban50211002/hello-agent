@@ -88,7 +88,7 @@ class KimiChatModel(BaseChatModel):
         formatted_tools = [convert_to_openai_tool(tool) for tool in tools]
         
         # 返回一个绑定了工具的新实例
-        return self.copy(update={"tools": formatted_tools, **kwargs})
+        return self.model_copy(update={"tools": formatted_tools, **kwargs})  # copy方法会导致bug且已废弃
     
     def _convert_message_to_dict(self, message: BaseMessage) -> Dict[str, Any]:
         """
@@ -190,7 +190,8 @@ class KimiChatModel(BaseChatModel):
             
             if response.status_code != 200:
                 error_detail = response.text
-                print(f"[KimiChatModel] ❌ API 错误 ({response.status_code}): {error_detail}")
+                print(f"[KimiChatModel] ❌ API 错误 ({response.status_code}): {error_detail}\n")
+                print(f"{payload}")
                 response.raise_for_status()
             
             response_data = response.json()
