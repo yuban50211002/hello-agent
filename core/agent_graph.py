@@ -23,6 +23,8 @@ from tools.web_tools import get_web_tools
 from langchain.agents import AgentState
 from langchain.tools import BaseTool
 from dotenv import load_dotenv
+from functools import reduce
+import operator
 
 from tools.mcp import loader as mcp_loader
 from core.extraction_tools import ExtractionToolsManager
@@ -57,16 +59,25 @@ def create_agent(
     ).bind_tools(tools=tools)
 
     async def agent_node(state: AgentState):
-        response = await llm.ainvoke(state["messages"])
+        response_text = ""
+        print("\n## AI：", end='', flush=True)
 
-        for block in response.content_blocks:
-            if "reasoning" in block:
-                reasoning = block["reasoning"]
-                print(f"\n--> thinking:\n{reasoning}")
-            if "text" in block:
-                text = block["text"]
-                print(f"\n--> {text}\n")
-        return {"messages": [response]}
+        chunks = []
+        async for chunk in llm.astream(state["messages"]):
+            chunks.append(chunk)
+            if reasoning := chunk.additional_kwargs.get("reasoning_content"):
+                print(reasoning, end='', flush=True)
+            else:
+                response_text += chunk.content
+                print(chunk.content, end='', flush=True)
+
+        print("\n")
+        combined_chunk = reduce(operator.add, chunks)
+        return {"messages": [AIMessage(content=combined_chunk.content,
+                                       tool_calls=combined_chunk.tool_calls,
+                                       id=combined_chunk.id,
+                                       additional_kwargs=combined_chunk.additional_kwargs)]
+                }
 
     def should_continue(state: AgentState) -> str:
         """路由决策 - 返回字符串"""
@@ -77,6 +88,8 @@ def create_agent(
 
     def interrupt_before_tool(state: AgentState) -> Command:
         last_message = state["messages"][-1]
+        if not hasattr(last_message, "tool_calls"):
+            return Command(goto="end")
         if not (tool_calls := last_message.tool_calls):
             return Command(goto="end")
         tool_call_names = interrupt_tools.intersection(tool_call["name"] for tool_call in tool_calls)
