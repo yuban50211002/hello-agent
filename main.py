@@ -69,4 +69,15 @@ async def main_async():
 
 if __name__ == "__main__":
     # 运行主函数
-    main()
+    from core.agent_graph import create_agent, chat
+
+    config = {
+        "configurable": {
+            "thread_id": "1"  # 用于人机协作
+        },
+        "recursion_limit": 10  # 限制递归深度
+    }
+
+    agent = create_agent(interrupt_tools={"my_shell_tool"})
+
+    asyncio.run(chat(agent=agent, config=config))

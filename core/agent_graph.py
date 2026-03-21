@@ -20,6 +20,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 from tools.web_tools import get_web_tools
+from tools.shell_tools import my_shell_tool
 from langchain.agents import AgentState
 from langchain.tools import BaseTool
 from dotenv import load_dotenv
@@ -47,7 +48,7 @@ def create_agent(
     llm_settings = get_settings().llm
 
     # 获取工具
-    tools = get_web_tools()
+    tools = get_web_tools() + [my_shell_tool]
 
     llm = create_kimi_chat_model(
         model=model_name,
@@ -56,10 +57,9 @@ def create_agent(
         base_url=llm_settings.api_base,
         thinking={"type": "enabled", "budget_tokens": 8192},  # ✅ 启用 thinking 模式
         request_timeout=llm_settings.request_timeout  # ✅ 从配置读取超时时间
-    ).bind_tools(tools=tools)
+    ).bind_tools(tools=tools, parallel_tool_calls=True)
 
     async def agent_node(state: AgentState):
-        response_text = ""
         print("\n## AI：", end='', flush=True)
 
         chunks = []
@@ -68,7 +68,6 @@ def create_agent(
             if reasoning := chunk.additional_kwargs.get("reasoning_content"):
                 print(reasoning, end='', flush=True)
             else:
-                response_text += chunk.content
                 print(chunk.content, end='', flush=True)
 
         print("\n")
@@ -94,7 +93,7 @@ def create_agent(
             return Command(goto="end")
         tool_call_names = interrupt_tools.intersection(tool_call["name"] for tool_call in tool_calls)
         if tool_call_names:
-            decision = interrupt(f"是否允许使用 {tool_call_names} ？同意(y)或说明原因：") or "（未说明）"
+            decision = interrupt(f"是否允许使用 {tool_call_names} ？同意(y)或说明原因：")
             if decision.strip().lower() == "y":
                 return Command(goto="tools")
             else:
@@ -141,22 +140,22 @@ async def chat(agent: CompiledStateGraph = None, config: dict[str, Any] = None):
         - 正常对话不需要调用任何工具
         - **如果工具调用失败，不要重试！** 直接向用户说明情况即可
         - 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
-        - 当你的回答中存在代码并且行数超过10时，将它们保存下来并为用户做简单介绍
-        - 当生成或保存了 Python 代码后，可以使用 execute_python 工具运行它并验证结果"""),
+        - 你的工作目录是当前目录下的"workspace"，在执行修改或删除等危险操作前必须获得用户同意
+        """),
                          HumanMessage(content=user_input)],
         }
 
         result = await agent.ainvoke(input=messages, config=config)
-        state = agent.get_state(config=config)
+        current_state = agent.get_state(config=config)
 
-        while state.next and "__interrupt__" in result:
-            current_interrupt = result["__interrupt__"][0]
+        while current_state.next and (interrupts := result.get("__interrupt__")):
+            current_interrupt = interrupts[0]
             interrupt_id = current_interrupt.id
             interrupt_value = current_interrupt.value
-            user_decision = input(interrupt_value)
+            user_decision = input(interrupt_value).strip()
             result = await agent.ainvoke(
                 Command(resume={
-                    interrupt_id: user_decision
+                    interrupt_id: (user_decision if user_decision else "（未说明）")
                 }),
                 config=config
             )
@@ -215,6 +214,6 @@ if __name__ == '__main__':
         "recursion_limit": 10  # 限制递归深度
     }
 
-    agent = create_agent(interrupt_tools={"web_search", "browse_webpage", "smart_web_browse"})
+    agent = create_agent(interrupt_tools={"my_shell_tool"})
 
     asyncio.run(chat(agent=agent, config=config))
