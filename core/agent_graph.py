@@ -31,8 +31,8 @@ from tools.mcp import loader as mcp_loader
 from core.extraction_tools import ExtractionToolsManager
 from core.schemas import Fact, Document
 from langchain.agents.middleware import ShellToolMiddleware, FilesystemFileSearchMiddleware
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import Command, interrupt
+from langgraph.types import Command, interrupt, Checkpointer
+from langgraph.store.base import BaseStore
 
 from memory import TieredMemory
 from llm.kimi_chat_model import create_kimi_chat_model
@@ -40,10 +40,13 @@ from config.settings import get_settings
 
 load_dotenv()
 
+
 def create_agent(
         model_name: str = "kimi-k2.5",
         temperature: float = 1.0,
-        interrupt_tools: set[str] = ()):
+        interrupt_tools: set[str] = (),
+        checkpointer: Checkpointer = None,
+        store: BaseStore = None):
     # 获取 API 配置
     llm_settings = get_settings().llm
 
@@ -119,18 +122,45 @@ def create_agent(
     workflow.add_edge("agent", "interrupt")
     workflow.add_edge("tools", "agent")
     # 编译
-    agent_graph = workflow.compile(checkpointer=InMemorySaver())  # 添加检查点
+    agent_graph = workflow.compile(checkpointer=checkpointer, store=store)
     return agent_graph
 
 
 async def chat(agent: CompiledStateGraph = None, config: dict[str, Any] = None):
     while True:
-        user_input = input("## 你：")
-        while not user_input:
-            user_input = input("## 输入内容不能为空，重新输入：")
-        if user_input.strip().lower() in ("exit", "退出"):
+        async for state in agent.aget_state_history(config=config, limit=10):
+            values = state.values
+        # 判断是否中断
+        current_state = await agent.aget_state(config=config)
+        while current_state.next and (interrupts := current_state.interrupts):
+            current_interrupt = interrupts[0]
+            interrupt_id = current_interrupt.id
+            interrupt_value = current_interrupt.value
+            print(interrupt_value)
+            user_decision = ""
+            while line := input().strip():
+                user_decision += line
+            if not user_decision:
+                continue
+            result = await agent.ainvoke(
+                Command(resume={
+                    interrupt_id: (user_decision if user_decision else "（未说明）")
+                }),
+                config=config
+            )
+            # 更新状态
+            current_state = await agent.aget_state(config=config)
+
+        # 正常执行
+        print("## 你：")
+        user_input = ""
+        while line := input().strip():
+            user_input += line + "\n"
+        if user_input.lower().rstrip("\n") in ("exit", "退出"):
             print("## 已退出")
             break
+        elif not user_input:
+            continue
 
         messages = {
             "messages": [SystemMessage(content="""你是一个智能助手，可以帮助用户完成各种任务。
@@ -146,19 +176,6 @@ async def chat(agent: CompiledStateGraph = None, config: dict[str, Any] = None):
         }
 
         result = await agent.ainvoke(input=messages, config=config)
-        current_state = agent.get_state(config=config)
-
-        while current_state.next and (interrupts := result.get("__interrupt__")):
-            current_interrupt = interrupts[0]
-            interrupt_id = current_interrupt.id
-            interrupt_value = current_interrupt.value
-            user_decision = input(interrupt_value).strip()
-            result = await agent.ainvoke(
-                Command(resume={
-                    interrupt_id: (user_decision if user_decision else "（未说明）")
-                }),
-                config=config
-            )
 
         print(result['messages'])
 
@@ -206,14 +223,26 @@ class BaseToolsNode:
             raise RuntimeError("并发执行工具运行时发生错误") from e
 
 
-if __name__ == '__main__':
+async def main():
+    """主函数 - 初始化 checkpointer 并运行 agent"""
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    import os
+    
+    # 确保 data 目录存在
+    os.makedirs("./data", exist_ok=True)
+    
     config = {
         "configurable": {
             "thread_id": "1"  # 用于人机协作
         },
         "recursion_limit": 10  # 限制递归深度
     }
+    
+    # 使用 async with 管理 AsyncSqliteSaver 的生命周期
+    async with (AsyncSqliteSaver.from_conn_string("./data/checkpoints.db") as checkpointer):
+        agent = create_agent(interrupt_tools={"my_shell_tool"}, checkpointer=checkpointer, store=checkpointer)
+        await chat(agent=agent, config=config)
 
-    agent = create_agent(interrupt_tools={"my_shell_tool"})
 
-    asyncio.run(chat(agent=agent, config=config))
+if __name__ == '__main__':
+    asyncio.run(main())
