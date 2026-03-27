@@ -16,6 +16,7 @@ import platform
 from langgraph.graph.message import add_messages
 from typing import List, Dict, Any, Optional, TypedDict, Annotated, Sequence
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain_core.runnables.base import RunnableConfig
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
@@ -63,6 +64,22 @@ def create_agent(
         request_timeout=llm_settings.request_timeout  # ✅ 从配置读取超时时间
     ).bind_tools(tools=tools, parallel_tool_calls=True)
 
+    def before_agent(state: AgentState, config: RunnableConfig, store: BaseStore):
+        sys_msg = SystemMessage(content=f"""你是一个智能助手，可以帮助用户完成各种任务。
+**重要规则**：
+- 正常对话不需要调用任何工具
+- 如果工具调用失败，不要重试，直接向用户说明情况即可
+- 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
+- 优先使用glob/grep工具，尽量不使用shell工具
+- 你只能在你的工作目录下操作文件："/Users/sunny/Documents/pycharm-projects/hello-agent/workspace"
+**当前时间**：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+""")
+        messages = state.get("messages")
+        if isinstance(messages[0], SystemMessage):
+            messages[0] = sys_msg
+        else:
+            messages.insert(0, sys_msg)
+
     async def agent_node(state: AgentState):
         print("\n## AI：", end='', flush=True)
 
@@ -84,10 +101,10 @@ def create_agent(
 
     def interrupt_before_tool(state: AgentState) -> Command:
         last_message = state["messages"][-1]
-        if not hasattr(last_message, "tool_calls"):
-            return Command(goto="end")
+        if not isinstance(last_message, AIMessage):
+            return Command(goto="after_agent")
         if not (tool_calls := last_message.tool_calls):
-            return Command(goto="end")
+            return Command(goto="after_agent")
         tool_call_names = interrupt_tools.intersection(tool_call["name"] for tool_call in tool_calls)
         if tool_call_names:
             decision = interrupt(f"是否允许使用 {tool_call_names} ？同意(y)或说明原因：")
@@ -102,19 +119,26 @@ def create_agent(
                 return Command(goto="agent", update={"messages": rejected_tools})
 
         return Command(goto="tools")
+    
+    def after_agent(state: AgentState, config: RunnableConfig, store: BaseStore):
+        messages = state.get("messages", [])
+        cut_off(messages)
 
     # 构建图
     workflow = StateGraph(AgentState)
     # 添加节点
+    workflow.add_node("before_agent", before_agent)
     workflow.add_node("agent", agent_node)
     tools_node = BaseToolsNode(tools)
     workflow.add_node("tools", tools_node)
-    # workflow.add_node("tools", ToolNode(tools=tools))
     workflow.add_node("interrupt", interrupt_before_tool)
+    workflow.add_node("after_agent", after_agent)
     # 添加边
-    workflow.set_entry_point("agent")
+    workflow.set_entry_point("before_agent")
+    workflow.add_edge("before_agent", "agent")
     workflow.add_edge("agent", "interrupt")
     workflow.add_edge("tools", "agent")
+    workflow.add_edge("after_agent", END)
     # 编译
     agent_graph = workflow.compile(checkpointer=checkpointer, store=store)
     return agent_graph
@@ -157,15 +181,7 @@ async def chat(agent: CompiledStateGraph = None, config: dict[str, Any] = None):
             continue
 
         messages = {
-            "messages": [SystemMessage(content="""你是一个智能助手，可以帮助用户完成各种任务。
-        **重要规则**：
-        - 正常对话不需要调用任何工具
-        - 如果工具调用失败，不要重试，直接向用户说明情况即可
-        - 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
-        - 优先使用glob/grep工具，尽量不使用shell工具
-        - 你只能在你的工作目录下操作文件："/Users/sunny/Documents/pycharm-projects/hello-agent/workspace"
-        """),
-                         HumanMessage(content=user_input)],
+            "messages": [HumanMessage(content=user_input)],
         }
 
         result = await agent.ainvoke(input=messages, config=config)
@@ -235,6 +251,54 @@ async def main():
     async with (AsyncSqliteSaver.from_conn_string("./data/checkpoints.db") as checkpointer):
         agent = create_agent(interrupt_tools={"my_shell_tool"}, checkpointer=checkpointer, store=checkpointer)
         await chat(agent=agent, config=config)
+
+
+def _split_into_rounds(messages: List[BaseMessage]) -> List[List[BaseMessage]]:
+    """将消息列表分割成轮次，每轮以HumanMessage开头"""
+    rounds = []
+    current_round = []
+
+    for msg in messages:
+        # 跳过SystemMessage
+        if isinstance(msg, SystemMessage):
+            continue
+
+        if isinstance(msg, HumanMessage):
+            # 如果当前轮次不为空，保存它
+            if current_round:
+                rounds.append(current_round)
+            # 开始新的一轮
+            current_round = [msg]
+        else:
+            # 添加到当前轮次
+            if current_round:  # 只有在已经有HumanMessage的情况下才添加
+                current_round.append(msg)
+
+    # 添加最后一轮
+    if current_round:
+        rounds.append(current_round)
+
+    return rounds
+
+
+def cut_off(messages: List[BaseMessage], max_rounds: int = 5):
+    """滑动窗口剪切对话"""
+    # 分离SystemMessage
+    # system_messages = [msg for msg in messages if isinstance(msg, SystemMessage)]
+    non_system_messages = [msg for msg in messages if not isinstance(msg, SystemMessage)]
+    # 分割成轮次
+    rounds = _split_into_rounds(non_system_messages)
+    # 如果轮次数量超过10轮
+    if len(rounds) >= max_rounds:
+        # 需要保存到数据库的轮次
+        # rounds_to_save = rounds[:-10]
+        # 保留在内存中的轮次
+        rounds_to_keep = rounds[-max_rounds:]
+        kept_messages = []
+        for round_msgs in rounds_to_keep:
+            kept_messages.extend(round_msgs)
+        messages.clear()
+        messages.extend(kept_messages)
 
 
 if __name__ == '__main__':
