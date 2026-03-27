@@ -20,6 +20,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 from tools.web_tools import get_web_tools
+from tools.file_search_tools import get_file_search_tools
 from tools.shell_tools import my_shell_tool
 from langchain.agents import AgentState
 from langchain.tools import BaseTool
@@ -51,7 +52,7 @@ def create_agent(
     llm_settings = get_settings().llm
 
     # 获取工具
-    tools = get_web_tools() + [my_shell_tool]
+    tools = get_web_tools() + [my_shell_tool] + get_file_search_tools()
 
     llm = create_kimi_chat_model(
         model=model_name,
@@ -80,13 +81,6 @@ def create_agent(
                                        id=combined_chunk.id,
                                        additional_kwargs=combined_chunk.additional_kwargs)]
                 }
-
-    def should_continue(state: AgentState) -> str:
-        """路由决策 - 返回字符串"""
-        last_message = state["messages"][-1]
-        if last_message.tool_calls:
-            return "interrupt"  # ✅ 返回字符串
-        return "end"  # ✅ 返回字符串
 
     def interrupt_before_tool(state: AgentState) -> Command:
         last_message = state["messages"][-1]
@@ -165,12 +159,11 @@ async def chat(agent: CompiledStateGraph = None, config: dict[str, Any] = None):
         messages = {
             "messages": [SystemMessage(content="""你是一个智能助手，可以帮助用户完成各种任务。
         **重要规则**：
-        - MCP工具是**可选的**，根据实际需要决定是否调用
-        - 可以只调用其中一个，或多个组合使用，或都不调用
         - 正常对话不需要调用任何工具
-        - **如果工具调用失败，不要重试！** 直接向用户说明情况即可
+        - 如果工具调用失败，不要重试，直接向用户说明情况即可
         - 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
-        - 你的工作目录是当前目录下的"workspace"，在执行修改或删除等危险操作前必须获得用户同意
+        - 优先使用glob/grep工具，尽量不使用shell工具
+        - 你只能在你的工作目录下操作文件："/Users/sunny/Documents/pycharm-projects/hello-agent/workspace"
         """),
                          HumanMessage(content=user_input)],
         }
@@ -235,7 +228,7 @@ async def main():
         "configurable": {
             "thread_id": "1"  # 用于人机协作
         },
-        "recursion_limit": 10  # 限制递归深度
+        "recursion_limit": 20  # 限制递归深度
     }
     
     # 使用 async with 管理 AsyncSqliteSaver 的生命周期
