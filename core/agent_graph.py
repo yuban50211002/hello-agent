@@ -40,6 +40,8 @@ from memory import TieredMemory
 from llm.kimi_chat_model import create_kimi_chat_model
 from config.settings import get_settings
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver, AsyncRedisCluster
+from dao.user_info import UserInfo
+from config.tortoise_conf import init_db, close_db
 
 load_dotenv()
 
@@ -73,11 +75,14 @@ def create_agent(
         request_timeout=llm_settings.request_timeout  # ✅ 从配置读取超时时间
     ).bind_tools(tools=tools, parallel_tool_calls=True)
 
-    def before_agent(state: MyState, config: RunnableConfig, store: BaseStore):
-        user_info = state.get("user_info", {})
+    async def before_agent(state: MyState, config: RunnableConfig, store: BaseStore):
+        # 获取用户信息
+        user_info = state.get("user_info")
         if not user_info:
-            # TODO 读数据库
-            user_info = {"name": "张三", "age": "18", "session_id": config.get("configurable", {}).get("thread_id")}
+            session_id = config.get("configurable", {}).get("thread_id")
+            user_info = await UserInfo.get_or_create(
+                session_id=session_id,
+            )
 
         sys_msg = SystemMessage(content=f"""你是一个智能助手，可以帮助用户完成各种任务。
 **重要规则**：
@@ -249,10 +254,6 @@ class BaseToolsNode:
 
 
 async def main():
-    """主函数 - 初始化 checkpointer 并运行 agent"""
-    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-    import os
-    
     # 确保 data 目录存在
     os.makedirs("./data", exist_ok=True)
     
@@ -262,12 +263,17 @@ async def main():
         },
         "recursion_limit": 20  # 限制递归深度
     }
-    
-    # 使用 async with 管理 AsyncSqliteSaver 的生命周期
-    async with (AsyncRedisSaver.from_conn_string(redis_url="redis://localhost:6379", ttl={"default_ttl": 120}) as checkpointer):
-        await checkpointer.asetup()
-        agent = create_agent(interrupt_tools={"my_shell_tool"}, checkpointer=checkpointer, store=checkpointer)
-        await chat(agent=agent, config=config)
+
+    try:
+        await init_db()
+        async with (AsyncRedisSaver.from_conn_string(redis_url="redis://localhost:6379", ttl={"default_ttl": 120}) as checkpointer):
+            await checkpointer.asetup()
+            agent = create_agent(interrupt_tools={"my_shell_tool"}, checkpointer=checkpointer, store=checkpointer)
+            await chat(agent=agent, config=config)
+    except Exception as e:
+        raise RuntimeError("运行过程发生错误") from e
+    finally:
+        await close_db()
 
 
 def _split_into_rounds(messages: List[BaseMessage]) -> List[List[BaseMessage]]:

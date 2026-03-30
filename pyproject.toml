@@ -13,7 +13,8 @@ packages = [
     {include = "tools"},
     {include = "llm"},
     {include = "utils"},
-    {include = "data"}
+    {include = "data"},
+    {include = "dao"}
 ]
 
 [tool.poetry.dependencies]
@@ -36,6 +37,8 @@ ddgs = "^9.11.3"
 langgraph = "^1.1.0"
 langgraph-checkpoint-sqlite = "^3.0.0"
 langgraph-checkpoint-redis = "^0.4.0"
+tortoise-orm = "^1.1.7"
+aiomysql = "^0.3.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
