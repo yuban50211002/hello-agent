@@ -39,8 +39,17 @@ from langgraph.store.base import BaseStore
 from memory import TieredMemory
 from llm.kimi_chat_model import create_kimi_chat_model
 from config.settings import get_settings
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver, AsyncRedisCluster
 
 load_dotenv()
+
+
+def user_reducer(old_value: dict, new_value: dict) -> dict:
+    return old_value | new_value
+
+
+class MyState(AgentState):
+    user_info: Annotated[dict[str, Any], user_reducer]
 
 
 def create_agent(
@@ -64,7 +73,12 @@ def create_agent(
         request_timeout=llm_settings.request_timeout  # ✅ 从配置读取超时时间
     ).bind_tools(tools=tools, parallel_tool_calls=True)
 
-    def before_agent(state: AgentState, config: RunnableConfig, store: BaseStore):
+    def before_agent(state: MyState, config: RunnableConfig, store: BaseStore):
+        user_info = state.get("user_info", {})
+        if not user_info:
+            # TODO 读数据库
+            user_info = {"name": "张三", "age": "18", "session_id": config.get("configurable", {}).get("thread_id")}
+
         sys_msg = SystemMessage(content=f"""你是一个智能助手，可以帮助用户完成各种任务。
 **重要规则**：
 - 正常对话不需要调用任何工具
@@ -80,7 +94,9 @@ def create_agent(
         else:
             messages.insert(0, sys_msg)
 
-    async def agent_node(state: AgentState):
+        return {"user_info": user_info}
+
+    async def agent_node(state: MyState):
         print("\n## AI：", end='', flush=True)
 
         chunks = []
@@ -99,7 +115,7 @@ def create_agent(
                                        additional_kwargs=combined_chunk.additional_kwargs)]
                 }
 
-    def interrupt_before_tool(state: AgentState) -> Command:
+    def interrupt_before_tool(state: MyState) -> Command:
         last_message = state["messages"][-1]
         if not isinstance(last_message, AIMessage):
             return Command(goto="after_agent")
@@ -120,12 +136,12 @@ def create_agent(
 
         return Command(goto="tools")
     
-    def after_agent(state: AgentState, config: RunnableConfig, store: BaseStore):
+    def after_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         messages = state.get("messages", [])
         cut_off(messages)
 
     # 构建图
-    workflow = StateGraph(AgentState)
+    workflow = StateGraph(MyState)
     # 添加节点
     workflow.add_node("before_agent", before_agent)
     workflow.add_node("agent", agent_node)
@@ -248,7 +264,8 @@ async def main():
     }
     
     # 使用 async with 管理 AsyncSqliteSaver 的生命周期
-    async with (AsyncSqliteSaver.from_conn_string("./data/checkpoints.db") as checkpointer):
+    async with (AsyncRedisSaver.from_conn_string(redis_url="redis://localhost:6379", ttl={"default_ttl": 120}) as checkpointer):
+        await checkpointer.asetup()
         agent = create_agent(interrupt_tools={"my_shell_tool"}, checkpointer=checkpointer, store=checkpointer)
         await chat(agent=agent, config=config)
 
