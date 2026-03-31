@@ -1432,8 +1432,7 @@ version = "1.78.0"
 description = "Protobuf code generator for gRPC"
 optional = false
 python-versions = ">=3.9"
-groups = ["dev"]
-markers = "python_version >= \"3.11\""
+groups = ["main", "dev"]
 files = [
     {file = "grpcio_tools-1.78.0-cp310-cp310-linux_armv7l.whl", hash = "sha256:ea64e38d1caa2b8468b08cb193f5a091d169b6dbfe1c7dac37d746651ab9d84e"},
     {file = "grpcio_tools-1.78.0-cp310-cp310-macosx_11_0_universal2.whl", hash = "sha256:4003fcd5cbb5d578b06176fd45883a72a8f9203152149b7c680ce28653ad9e3a"},
@@ -1497,6 +1496,7 @@ files = [
     {file = "grpcio_tools-1.78.0-cp39-cp39-win_amd64.whl", hash = "sha256:6ddf7e7a7d069e7287b9cb68937102efe1686e63117a162d01578ac2839b4acd"},
     {file = "grpcio_tools-1.78.0.tar.gz", hash = "sha256:4b0dd86560274316e155d925158276f8564508193088bc43e20d3f5dff956b2b"},
 ]
+markers = {dev = "python_version >= \"3.11\""}
 
 [package.dependencies]
 grpcio = ">=1.78.0"
@@ -3459,6 +3459,22 @@ importlib-metadata = ">=6.0,<8.8.0"
 typing-extensions = ">=4.5.0"
 
 [[package]]
+name = "opentelemetry-exporter-otlp"
+version = "1.40.0"
+description = "OpenTelemetry Collector Exporters"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "opentelemetry_exporter_otlp-1.40.0-py3-none-any.whl", hash = "sha256:48c87e539ec9afb30dc443775a1334cc5487de2f72a770a4c00b1610bf6c697d"},
+    {file = "opentelemetry_exporter_otlp-1.40.0.tar.gz", hash = "sha256:7caa0870b95e2fcb59d64e16e2b639ecffb07771b6cd0000b5d12e5e4fef765a"},
+]
+
+[package.dependencies]
+opentelemetry-exporter-otlp-proto-grpc = "1.40.0"
+opentelemetry-exporter-otlp-proto-http = "1.40.0"
+
+[[package]]
 name = "opentelemetry-exporter-otlp-proto-common"
 version = "1.40.0"
 description = "OpenTelemetry Protobuf encoding"
@@ -3508,12 +3524,12 @@ version = "1.40.0"
 description = "OpenTelemetry Collector Protobuf over HTTP Exporter"
 optional = false
 python-versions = ">=3.9"
-groups = ["dev"]
-markers = "python_version >= \"3.11\""
+groups = ["main", "dev"]
 files = [
     {file = "opentelemetry_exporter_otlp_proto_http-1.40.0-py3-none-any.whl", hash = "sha256:a8d1dab28f504c5d96577d6509f80a8150e44e8f45f82cdbe0e34c99ab040069"},
     {file = "opentelemetry_exporter_otlp_proto_http-1.40.0.tar.gz", hash = "sha256:db48f5e0f33217588bbc00274a31517ba830da576e59503507c839b38fa0869c"},
 ]
+markers = {dev = "python_version >= \"3.11\""}
 
 [package.dependencies]
 googleapis-common-protos = ">=1.52,<2.0"
@@ -5000,6 +5016,26 @@ pygments = ">=2.13.0,<3.0.0"
 jupyter = ["ipywidgets (>=7.5.1,<9)"]
 
 [[package]]
+name = "rocketmq-python-client"
+version = "5.0.9"
+description = ""
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "rocketmq_python_client-5.0.9-py3-none-any.whl", hash = "sha256:7c6a64b68dfca7b5e7b8b52e8ac7eddcf1e47a1a87f069105dbdaea5c05ee2fa"},
+    {file = "rocketmq_python_client-5.0.9.tar.gz", hash = "sha256:6c3cb62476bc71c27aa5d41d26fdf6aebd2f590a663eda6eeee3527163b4bac1"},
+]
+
+[package.dependencies]
+grpcio = ">=1.5.0"
+grpcio-tools = ">=1.5.0"
+opentelemetry-api = ">=1.33.0"
+opentelemetry-exporter-otlp = ">=1.33.0"
+opentelemetry-sdk = ">=1.33.0"
+protobuf = "*"
+
+[[package]]
 name = "rpds-py"
 version = "0.30.0"
 description = "Python bindings to Rust's persistent data structures (rpds)"
@@ -5130,12 +5166,12 @@ version = "82.0.1"
 description = "Most extensible Python build backend with support for C/C++ extension modules"
 optional = false
 python-versions = ">=3.9"
-groups = ["dev"]
-markers = "python_version >= \"3.11\""
+groups = ["main", "dev"]
 files = [
     {file = "setuptools-82.0.1-py3-none-any.whl", hash = "sha256:a59e362652f08dcd477c78bb6e7bd9d80a7995bc73ce773050228a348ce2e5bb"},
     {file = "setuptools-82.0.1.tar.gz", hash = "sha256:7d872682c5d01cfde07da7bccc7b65469d3dca203318515ada1de5eda35efbf9"},
 ]
+markers = {dev = "python_version >= \"3.11\""}
 
 [package.extras]
 check = ["pytest-checkdocs (>=2.4)", "pytest-ruff (>=0.2.1) ; sys_platform != \"cygwin\"", "ruff (>=0.13.0) ; sys_platform != \"cygwin\""]
@@ -6554,4 +6590,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.15"
-content-hash = "ab1279602373ebd6ad7737a1e632aa3bc9db540c7c2a0f3b9b8025ea110d7ede"
+content-hash = "f66e567512af9dd9552a72bcd4d05f83dbaf54684986da44424e23b314a51be9"

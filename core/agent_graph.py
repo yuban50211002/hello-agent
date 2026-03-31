@@ -42,16 +42,17 @@ from config.settings import get_settings
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver, AsyncRedisCluster
 from dao.user_info import UserInfo
 from config.tortoise_conf import init_db, close_db
+from utils.rocketmq_util import RocketMQProducer, RocketMQConsumer
 
 load_dotenv()
 
 
-def user_reducer(old_value: dict, new_value: dict) -> dict:
-    return old_value | new_value
+def user_reducer(old_value: UserInfo, new_value: UserInfo) -> UserInfo:
+    return new_value if new_value and new_value.session_id else old_value
 
 
 class MyState(AgentState):
-    user_info: Annotated[dict[str, Any], user_reducer]
+    user_info: Annotated[UserInfo, user_reducer]
 
 
 def create_agent(
@@ -75,14 +76,22 @@ def create_agent(
         request_timeout=llm_settings.request_timeout  # ✅ 从配置读取超时时间
     ).bind_tools(tools=tools, parallel_tool_calls=True)
 
+    # MQ生产者
+    producer = RocketMQProducer(
+        endpoints="127.0.0.1:9080",  # gRPC Proxy 监听端口
+        topic="test-topic"
+    )
+    producer.start()
+
     async def before_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         # 获取用户信息
         user_info = state.get("user_info")
-        if not user_info:
+        if not (user_info and user_info.session_id):
             session_id = config.get("configurable", {}).get("thread_id")
-            user_info = await UserInfo.get_or_create(
+            result = await UserInfo.get_or_create(
                 session_id=session_id,
             )
+            user_info = result[0]
 
         sys_msg = SystemMessage(content=f"""你是一个智能助手，可以帮助用户完成各种任务。
 **重要规则**：
@@ -143,7 +152,20 @@ def create_agent(
     
     def after_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         messages = state.get("messages", [])
-        cut_off(messages)
+        rounds = cut_off(messages)
+        mess: list[dict] = []
+        for msg in rounds[-1]:
+            m = {}
+            if isinstance(msg, HumanMessage):
+                m["role"] = "human"
+                m["content"] = msg.content
+                mess.append(m)
+            elif isinstance(msg, AIMessage):
+                m["role"] = "ai"
+                m["content"] = msg.content
+                mess.append(m)
+
+        producer.send(json.dumps(mess))
 
     # 构建图
     workflow = StateGraph(MyState)
@@ -322,6 +344,7 @@ def cut_off(messages: List[BaseMessage], max_rounds: int = 5):
             kept_messages.extend(round_msgs)
         messages.clear()
         messages.extend(kept_messages)
+    return rounds
 
 
 if __name__ == '__main__':
