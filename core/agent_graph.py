@@ -1,50 +1,36 @@
-"""
-AI Agent 实现 - 使用可选工具 + 三层记忆中间件
 
-核心优势：
-- AI 自己判断是否需要提取事实或保存文档
-- 不使用 response_format（避免 tool_choice='required'）
-- 兼容 Kimi-k2.5 的 thinking 模式
-- 集成三层记忆中间件（自动管理对话历史）
-"""
+import pickle
 import asyncio
 import json
 import operator
 import os
 from datetime import datetime
 import platform
-from langgraph.graph.message import add_messages
 from typing import List, Dict, Any, Optional, TypedDict, Annotated, Sequence
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_core.runnables.base import RunnableConfig
+from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.graph.message import add_messages
+from langgraph.types import Command, interrupt, Checkpointer
+from langgraph.store.base import BaseStore
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver, AsyncRedisCluster
+
 from tools.web_tools import get_web_tools
 from tools.file_search_tools import get_file_search_tools
 from tools.shell_tools import my_shell_tool
 from langchain.agents import AgentState
 from langchain.tools import BaseTool
-from dotenv import load_dotenv
 from functools import reduce
 import operator
+from utils.rocketmq_util import MemoryMsg
 
-from tools.mcp import loader as mcp_loader
-from core.extraction_tools import ExtractionToolsManager
-from core.schemas import Fact, Document
-from langchain.agents.middleware import ShellToolMiddleware, FilesystemFileSearchMiddleware
-from langgraph.types import Command, interrupt, Checkpointer
-from langgraph.store.base import BaseStore
-
-from memory import TieredMemory
-from llm.kimi_chat_model import create_kimi_chat_model
-from config.settings import get_settings
-from langgraph.checkpoint.redis.aio import AsyncRedisSaver, AsyncRedisCluster
+from config.container import get_redis, get_kimi_model, get_intention_model, get_rocketmq_producer, cleanup_resources
 from dao.user_info import UserInfo
 from config.tortoise_conf import init_db, close_db
-from utils.rocketmq_util import RocketMQProducer, RocketMQConsumer
-
-load_dotenv()
+from langchain_ollama import ChatOllama
 
 
 def user_reducer(old_value: UserInfo, new_value: UserInfo) -> UserInfo:
@@ -53,46 +39,44 @@ def user_reducer(old_value: UserInfo, new_value: UserInfo) -> UserInfo:
 
 class MyState(AgentState):
     user_info: Annotated[UserInfo, user_reducer]
+    query: Annotated[str, (lambda old, new: new if new else old)]
 
 
 def create_agent(
-        model_name: str = "kimi-k2.5",
-        temperature: float = 1.0,
+        llm: BaseChatModel,
         interrupt_tools: set[str] = (),
         checkpointer: Checkpointer = None,
         store: BaseStore = None):
-    # 获取 API 配置
-    llm_settings = get_settings().llm
-
     # 获取工具
     tools = get_web_tools() + [my_shell_tool] + get_file_search_tools()
 
-    llm = create_kimi_chat_model(
-        model=model_name,
-        temperature=temperature,
-        api_key=llm_settings.api_key,
-        base_url=llm_settings.api_base,
-        thinking={"type": "enabled", "budget_tokens": 8192},  # ✅ 启用 thinking 模式
-        request_timeout=llm_settings.request_timeout  # ✅ 从配置读取超时时间
-    ).bind_tools(tools=tools, parallel_tool_calls=True)
+    #  使用依赖注入获取 LLM (自动复用单例)
+    llm.bind_tools(tools=tools, parallel_tool_calls=True)
 
-    # MQ生产者
-    producer = RocketMQProducer(
-        endpoints="127.0.0.1:9080",  # gRPC Proxy 监听端口
-        topic="test-topic"
-    )
-    producer.start()
+    #  使用依赖注入获取 MQ 生产者 (自动复用单例)
+    producer = get_rocketmq_producer()
+
+    # redis
+    redis = get_redis()
 
     async def before_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         # 获取用户信息
-        user_info = state.get("user_info")
-        if not (user_info and user_info.session_id):
-            session_id = config.get("configurable", {}).get("thread_id")
-            result = await UserInfo.get_or_create(
-                session_id=session_id,
-            )
+        session_id = config.get("configurable", {}).get("thread_id")
+        user_key = f"user_info:{session_id}"
+        user_info_bytes = await redis.get(user_key)
+        if user_info_bytes:
+            # Pickle 反序列化
+            user_info = pickle.loads(user_info_bytes)
+        else:
+            # 从数据库获取
+            result = await UserInfo.get_or_create(session_id=session_id, )
             user_info = result[0]
+            await redis.setex(f"user_info:{session_id}", 1800, pickle.dumps(user_info))
 
+        messages = state.get("messages")
+        query = state.get("query")
+
+        # 更新系统消息
         sys_msg = SystemMessage(content=f"""你是一个智能助手，可以帮助用户完成各种任务。
 **重要规则**：
 - 正常对话不需要调用任何工具
@@ -102,13 +86,12 @@ def create_agent(
 - 你只能在你的工作目录下操作文件："/Users/sunny/Documents/pycharm-projects/hello-agent/workspace"
 **当前时间**：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """)
-        messages = state.get("messages")
-        if isinstance(messages[0], SystemMessage):
+        if messages and isinstance(messages[0], SystemMessage):
             messages[0] = sys_msg
         else:
             messages.insert(0, sys_msg)
 
-        return {"user_info": user_info}
+        return {"user_info": user_info, "messages": [HumanMessage(content=query)]}
 
     async def agent_node(state: MyState):
         print("\n## AI：", end='', flush=True)
@@ -153,19 +136,22 @@ def create_agent(
     def after_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         messages = state.get("messages", [])
         rounds = cut_off(messages)
-        mess: list[dict] = []
-        for msg in rounds[-1]:
-            m = {}
-            if isinstance(msg, HumanMessage):
-                m["role"] = "human"
-                m["content"] = msg.content
-                mess.append(m)
-            elif isinstance(msg, AIMessage):
-                m["role"] = "ai"
-                m["content"] = msg.content
-                mess.append(m)
 
-        producer.send(json.dumps(mess))
+        history_text = ""
+        for round_idx, round_messages in enumerate(rounds[-2:], 1):
+            for msg in round_messages:
+                if isinstance(msg, HumanMessage):
+                    history_text += f"用户: {msg.content}\n"
+                elif isinstance(msg, AIMessage):
+                    history_text += f"助手: {msg.content}\n"
+            history_text += "\n"  # 轮次之间空一行
+
+        if not history_text.strip():
+            history_text = "无对话历史"
+        msg = MemoryMsg(session_id=config.get("configurable", {}).get("thread_id", ""),
+                        chat_history=history_text)
+
+        producer.send(msg.model_dump_json())
 
     # 构建图
     workflow = StateGraph(MyState)
@@ -189,8 +175,6 @@ def create_agent(
 
 async def chat(agent: CompiledStateGraph = None, config: dict[str, Any] = None):
     while True:
-        async for state in agent.aget_state_history(config=config, limit=10):
-            values = state.values
         # 判断是否中断
         current_state = await agent.aget_state(config=config)
         while current_state.next and (interrupts := current_state.interrupts):
@@ -224,7 +208,7 @@ async def chat(agent: CompiledStateGraph = None, config: dict[str, Any] = None):
             continue
 
         messages = {
-            "messages": [HumanMessage(content=user_input)],
+            "query": user_input
         }
 
         result = await agent.ainvoke(input=messages, config=config)
@@ -287,14 +271,16 @@ async def main():
     }
 
     try:
+        get_rocketmq_producer().start()
         await init_db()
-        async with (AsyncRedisSaver.from_conn_string(redis_url="redis://localhost:6379", ttl={"default_ttl": 120}) as checkpointer):
+        async with (AsyncRedisSaver.from_conn_string(redis_client=get_redis(), ttl={"default_ttl": 120}) as checkpointer):
             await checkpointer.asetup()
-            agent = create_agent(interrupt_tools={"my_shell_tool"}, checkpointer=checkpointer, store=checkpointer)
+            agent = create_agent(llm=get_kimi_model(), interrupt_tools={"my_shell_tool"}, checkpointer=checkpointer)
             await chat(agent=agent, config=config)
     except Exception as e:
         raise RuntimeError("运行过程发生错误") from e
     finally:
+        await cleanup_resources()
         await close_db()
 
 

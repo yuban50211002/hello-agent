@@ -276,7 +276,7 @@ class KimiChatModel(ChatOpenAI):
 
         # 🔥 使用 httpx 直接调用 Kimi API（支持 thinking 参数）
         try:
-            response = await self.http_client.post(
+            response = await self._http_async_client.post(
                 "/chat/completions",
                 json=payload
             )

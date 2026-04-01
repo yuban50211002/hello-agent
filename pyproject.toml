@@ -40,6 +40,8 @@ langgraph-checkpoint-redis = "^0.4.0"
 tortoise-orm = "^1.1.7"
 aiomysql = "^0.3.2"
 rocketmq-python-client = "~5.0.6"
+dependency-injector = {extras = ["pydantic2"], version = "^4.49.0"}
+redis = {extras = ["hiredis"], version = "^5.0.0"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"

@@ -23,7 +23,7 @@ class LLMSettings(BaseSettings):
     temperature: float = 1.0
     api_key: Optional[str] = None
     api_base: Optional[str] = None
-    local_model: str = "qwen2.5:7b"
+    local_model: str = "qwen2.5:3B"
     use_local: bool = False
     request_timeout: float = 60.0  # API 请求超时时间（秒）
     
@@ -65,6 +65,18 @@ class MCPSettings(BaseSettings):
         env_prefix = "MCP_"
 
 
+class RedisSettings(BaseSettings):
+    """Redis 配置"""
+    host: str = "localhost"
+    port: int = 6379
+    db: int = 0
+    max_connections: int = 50
+    socket_timeout: int = 5
+    
+    class Config:
+        env_prefix = "REDIS_"
+
+
 class AppSettings(BaseSettings):
     """应用配置（顶层配置）"""
     
@@ -77,6 +89,7 @@ class AppSettings(BaseSettings):
     llm: LLMSettings = LLMSettings.from_env()
     memory: MemorySettings = MemorySettings()
     mcp: MCPSettings = MCPSettings()
+    redis: RedisSettings = RedisSettings()
     
     class Config:
         env_prefix = "APP_"
@@ -87,7 +100,8 @@ class AppSettings(BaseSettings):
         return cls(
             llm=LLMSettings.from_env(),
             memory=MemorySettings(),
-            mcp=MCPSettings()
+            mcp=MCPSettings(),
+            redis=RedisSettings()
         )
 
 
