@@ -58,7 +58,7 @@ def create_agent(
     tools = get_web_tools() + [my_shell_tool] + get_file_search_tools()
 
     #  使用依赖注入获取 LLM (自动复用单例)
-    llm.bind_tools(tools=tools, parallel_tool_calls=True)
+    llm_with_tools = llm.bind_tools(tools=tools, parallel_tool_calls=True)
 
     #  使用依赖注入获取 MQ 生产者 (自动复用单例)
     producer = get_rocketmq_producer()
@@ -80,15 +80,13 @@ def create_agent(
         sys_msg = SystemMessage(content=f"""你是一个智能助手，可以帮助用户完成各种任务。
 
 **重要规则**：
+- 你的信息是过时的，任何回答都应该注意当前时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 - 正常对话不需要调用任何工具
 - 如果工具调用失败，不要重试，直接向用户说明情况即可
 - 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
-- 优先使用glob_search/grep_search工具，尽量不使用shell工具
+- 优先使用glob/grep工具，尽量不使用shell工具
 - 只能在你的工作目录下操作文件："/Users/sunny/Documents/pycharm-projects/hello-agent/workspace"
 - 回答应当简洁，不要废话
-
-**当前时间**：
-{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """)
         if messages and isinstance(messages[0], SystemMessage):
             messages[0] = sys_msg
@@ -99,7 +97,7 @@ def create_agent(
 
     async def agent_node(state: MyState, writer: StreamWriter):
         chunks = []
-        async for chunk in llm.astream(state["messages"]):
+        async for chunk in llm_with_tools.astream(state["messages"]):
             writer(chunk)  # 实时流式发送每个chunk
             chunks.append(chunk)
         combined_chunk = reduce(operator.add, chunks)
@@ -115,7 +113,7 @@ def create_agent(
             return Command(goto="after_agent")
         tool_call_names = interrupt_tools.intersection(tool_call["name"] for tool_call in tool_calls)
         if tool_call_names:
-            decision = interrupt(f"是否允许使用 {tool_call_names} ？同意(y)或说明原因：")
+            decision = interrupt(f"\n\n是否允许使用 {tool_call_names} ？同意(y)或说明原因：")
             if decision.strip().lower() == "y":
                 return Command(goto="tools")
             else:
