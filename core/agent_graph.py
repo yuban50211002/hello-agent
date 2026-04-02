@@ -6,7 +6,7 @@ import operator
 import os
 from datetime import datetime
 import platform
-from typing import List, Dict, Any, Optional, TypedDict, Annotated, Sequence
+from typing import List, Dict, Any, Optional, TypedDict, Annotated, Sequence, Union, Required
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_core.runnables.base import RunnableConfig
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -14,7 +14,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.graph.message import add_messages
-from langgraph.types import Command, interrupt, Checkpointer
+from langgraph.types import Command, interrupt, Checkpointer, StreamWriter
 from langgraph.store.base import BaseStore
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver, AsyncRedisCluster
 
@@ -37,9 +37,16 @@ def user_reducer(old_value: UserInfo, new_value: UserInfo) -> UserInfo:
     return new_value if new_value and new_value.session_id else old_value
 
 
+def tokens_reducer(old: int, new: Union[int, str]) -> int:
+    if new == "RESET":
+        return 0
+    return old + new
+
+
 class MyState(AgentState):
     user_info: Annotated[UserInfo, user_reducer]
     query: Annotated[str, (lambda old, new: new if new else old)]
+    total_tokens: Annotated[int, tokens_reducer]
 
 
 def create_agent(
@@ -56,60 +63,48 @@ def create_agent(
     #  使用依赖注入获取 MQ 生产者 (自动复用单例)
     producer = get_rocketmq_producer()
 
-    # redis
-    redis = get_redis()
-
     async def before_agent(state: MyState, config: RunnableConfig, store: BaseStore):
+        messages = state.get("messages")
+        # 滑动窗口
+        cut_off(messages)
+        # 压缩工具结果
+        micro_compact(messages)
+
         # 获取用户信息
         session_id = config.get("configurable", {}).get("thread_id")
-        user_key = f"user_info:{session_id}"
-        user_info_bytes = await redis.get(user_key)
-        if user_info_bytes:
-            # Pickle 反序列化
-            user_info = pickle.loads(user_info_bytes)
-        else:
-            # 从数据库获取
-            result = await UserInfo.get_or_create(session_id=session_id, )
-            user_info = result[0]
-            await redis.setex(f"user_info:{session_id}", 1800, pickle.dumps(user_info))
+        user_info = await get_user(session_id)
 
-        messages = state.get("messages")
         query = state.get("query")
 
         # 更新系统消息
         sys_msg = SystemMessage(content=f"""你是一个智能助手，可以帮助用户完成各种任务。
+
 **重要规则**：
 - 正常对话不需要调用任何工具
 - 如果工具调用失败，不要重试，直接向用户说明情况即可
 - 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
-- 优先使用glob/grep工具，尽量不使用shell工具
-- 你只能在你的工作目录下操作文件："/Users/sunny/Documents/pycharm-projects/hello-agent/workspace"
-**当前时间**：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+- 优先使用glob_search/grep_search工具，尽量不使用shell工具
+- 只能在你的工作目录下操作文件："/Users/sunny/Documents/pycharm-projects/hello-agent/workspace"
+- 回答应当简洁，不要废话
+
+**当前时间**：
+{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """)
         if messages and isinstance(messages[0], SystemMessage):
             messages[0] = sys_msg
         else:
             messages.insert(0, sys_msg)
 
-        return {"user_info": user_info, "messages": [HumanMessage(content=query)]}
+        return {"user_info": user_info, "messages": [HumanMessage(content=query)], "total_tokens": "RESET"}
 
-    async def agent_node(state: MyState):
-        print("\n## AI：", end='', flush=True)
-
+    async def agent_node(state: MyState, writer: StreamWriter):
         chunks = []
         async for chunk in llm.astream(state["messages"]):
+            writer(chunk)  # 实时流式发送每个chunk
             chunks.append(chunk)
-            if reasoning := chunk.additional_kwargs.get("reasoning_content"):
-                print(reasoning, end='', flush=True)
-            else:
-                print(chunk.content, end='', flush=True)
-
-        print("\n")
         combined_chunk = reduce(operator.add, chunks)
-        return {"messages": [AIMessage(content=combined_chunk.content,
-                                       tool_calls=combined_chunk.tool_calls,
-                                       id=combined_chunk.id,
-                                       additional_kwargs=combined_chunk.additional_kwargs)]
+        return {"messages": [combined_chunk],
+                "total_tokens": combined_chunk.usage_metadata.get("total_tokens", 0)
                 }
 
     def interrupt_before_tool(state: MyState) -> Command:
@@ -135,7 +130,7 @@ def create_agent(
     
     def after_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         messages = state.get("messages", [])
-        rounds = cut_off(messages)
+        rounds = _split_into_rounds(messages)
 
         history_text = ""
         for round_idx, round_messages in enumerate(rounds[-2:], 1):
@@ -152,6 +147,7 @@ def create_agent(
                         chat_history=history_text)
 
         producer.send(msg.model_dump_json())
+        print(f"\n\ntoken使用量: {state.get('total_tokens', 0)}")
 
     # 构建图
     workflow = StateGraph(MyState)
@@ -187,12 +183,15 @@ async def chat(agent: CompiledStateGraph = None, config: dict[str, Any] = None):
                 user_decision += line
             if not user_decision:
                 continue
-            result = await agent.ainvoke(
+            async for chunk in agent.astream(
                 Command(resume={
                     interrupt_id: (user_decision if user_decision else "（未说明）")
                 }),
-                config=config
-            )
+                config=config,
+                stream_mode="custom",
+                version="v2"
+            ):
+                await deal_stream(chunk)
             # 更新状态
             current_state = await agent.aget_state(config=config)
 
@@ -207,13 +206,22 @@ async def chat(agent: CompiledStateGraph = None, config: dict[str, Any] = None):
         elif not user_input:
             continue
 
-        messages = {
+        print("\n## AI：", end='', flush=True)
+        # 初始状态
+        input_state = {
             "query": user_input
         }
+        async for chunk in agent.astream(input=input_state, config=config, stream_mode="custom", version="v2"):
+            await deal_stream(chunk)
 
-        result = await agent.ainvoke(input=messages, config=config)
 
-        print(result['messages'])
+async def deal_stream(chunk):
+    if chunk["type"] == "custom":
+        msg = chunk["data"]
+        if reasoning := msg.additional_kwargs.get("reasoning_content"):
+            print(reasoning, end='', flush=True)
+        else:
+            print(msg.content, end='', flush=True)
 
 
 class BaseToolsNode:
@@ -331,6 +339,29 @@ def cut_off(messages: List[BaseMessage], max_rounds: int = 5):
         messages.clear()
         messages.extend(kept_messages)
     return rounds
+
+
+def micro_compact(messages: list[BaseMessage], keep_recent: int = 3):
+    tool_results = [msg for msg in messages if isinstance(msg, ToolMessage)]
+    if len(tool_results) <= keep_recent:
+        return
+    for msg in tool_results[:-keep_recent]:
+        msg.content = "CLEARED"
+
+
+async def get_user(session_id):
+    redis = get_redis()
+    user_key = f"user_info:{session_id}"
+    user_info_bytes = await redis.get(user_key)
+    if user_info_bytes:
+        # Pickle 反序列化
+        user_info = pickle.loads(user_info_bytes)
+    else:
+        # 从数据库获取
+        result = await UserInfo.get_or_create(session_id=session_id, )
+        user_info = result[0]
+        await redis.setex(f"user_info:{session_id}", 1800, pickle.dumps(user_info))
+    return user_info
 
 
 if __name__ == '__main__':

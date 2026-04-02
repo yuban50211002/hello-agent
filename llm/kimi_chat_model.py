@@ -477,4 +477,7 @@ def create_kimi_chat_model(
         thinking=thinking,
         max_tokens=max_tokens,
         request_timeout=request_timeout,
+        model_kwargs={
+            "stream_options": {"include_usage": True},  # 启用token统计
+        }
     )
