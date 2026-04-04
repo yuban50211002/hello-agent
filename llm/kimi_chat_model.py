@@ -202,6 +202,8 @@ class KimiChatModel(ChatOpenAI):
             # 🔥 关键：恢复 reasoning_content
             if "reasoning_content" in message.additional_kwargs:
                 message_dict["reasoning_content"] = message.additional_kwargs["reasoning_content"]
+            else:
+                message_dict["reasoning_content"] = "NOTHING"
 
         # 处理 ToolMessage 的特殊字段
         if isinstance(message, ToolMessage):
