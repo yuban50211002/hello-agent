@@ -21,6 +21,7 @@ from langgraph.checkpoint.redis.aio import AsyncRedisSaver, AsyncRedisCluster
 from tools.web_tools import get_web_tools
 from tools.file_search_tools import get_file_search_tools
 from tools.shell_tools import my_shell_tool
+from tools.planning import todo_tool, TodoManager
 from langchain.agents import AgentState
 from langchain.tools import BaseTool
 from functools import reduce
@@ -43,10 +44,17 @@ def tokens_reducer(old: int, new: Union[int, str]) -> int:
     return old + new
 
 
+def todo_reducer(old: TodoManager, new: TodoManager) -> TodoManager:
+    return old.model_copy(update=new.model_dump(mode="json",
+                                                exclude_unset=True,
+                                                exclude_none=True))
+
+
 class MyState(AgentState):
     user_info: Annotated[UserInfo, user_reducer]
     query: Annotated[str, (lambda old, new: new if new else old)]
     total_tokens: Annotated[int, tokens_reducer]
+    todo: Annotated[TodoManager, todo_reducer]
 
 
 def create_agent(
@@ -55,7 +63,7 @@ def create_agent(
         checkpointer: Checkpointer = None,
         store: BaseStore = None):
     # 获取工具
-    tools = get_web_tools() + [my_shell_tool] + get_file_search_tools()
+    tools = get_web_tools() + [my_shell_tool, todo_tool] + get_file_search_tools()
 
     #  使用依赖注入获取 LLM (自动复用单例)
     llm_with_tools = llm.bind_tools(tools=tools, parallel_tool_calls=True)
@@ -85,15 +93,19 @@ def create_agent(
 - 如果工具调用失败，不要重试，直接向用户说明情况即可
 - 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
 - 优先使用glob/grep工具，尽量不使用shell工具
-- 只能在你的工作目录下操作文件："/Users/sunny/Documents/pycharm-projects/hello-agent/workspace"
 - 回答应当简洁，不要废话
+- 必须先拆分任务，先写todo后执行
 """)
         if messages and isinstance(messages[0], SystemMessage):
             messages[0] = sys_msg
         else:
             messages.insert(0, sys_msg)
 
-        return {"user_info": user_info, "messages": [HumanMessage(content=query)], "total_tokens": "RESET"}
+        return {"user_info": user_info,
+                "messages": [HumanMessage(content=query)],
+                "total_tokens": "RESET",
+                "todo": TodoManager(items=[], rounds_since_todo=0)
+                }
 
     async def agent_node(state: MyState, writer: StreamWriter):
         chunks = []
@@ -125,6 +137,25 @@ def create_agent(
                 return Command(goto="agent", update={"messages": rejected_tools})
 
         return Command(goto="tools")
+
+    def after_tool(state: MyState):
+        # 周期提醒LLM更新todo
+        todo_manager: TodoManager = state.get("todo")
+        messages: list[BaseMessage] = state.get("messages", [])
+        last_ai_msg = None
+        for msg in messages[::-1]:
+            if isinstance(msg, AIMessage):
+                last_ai_msg = msg
+                break
+        call_count = len(last_ai_msg.tool_calls)
+        todo_msgs: list[ToolMessage] = [msg for msg in messages[-call_count:] if msg.name == "todo_tool"]
+        if todo_msgs:
+            todo_manager.rounds_since_todo = 0
+        else:
+            todo_manager.rounds_since_todo += 1
+
+        if todo_manager.rounds_since_todo >= 3:
+            return {"messages": [HumanMessage(content="<reminder>Update your todos.</reminder>")]}
     
     def after_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         messages = state.get("messages", [])
@@ -152,15 +183,18 @@ def create_agent(
     # 添加节点
     workflow.add_node("before_agent", before_agent)
     workflow.add_node("agent", agent_node)
-    tools_node = BaseToolsNode(tools)
-    workflow.add_node("tools", tools_node)
     workflow.add_node("interrupt", interrupt_before_tool)
+    # tools_node = BaseToolsNode(tools)
+    tools_node = ToolNode(tools=tools)
+    workflow.add_node("tools", tools_node)
+    workflow.add_node("after_tool", after_tool)
     workflow.add_node("after_agent", after_agent)
     # 添加边
     workflow.set_entry_point("before_agent")
     workflow.add_edge("before_agent", "agent")
     workflow.add_edge("agent", "interrupt")
-    workflow.add_edge("tools", "agent")
+    workflow.add_edge("tools", "after_tool")
+    workflow.add_edge("after_tool", "agent")
     workflow.add_edge("after_agent", END)
     # 编译
     agent_graph = workflow.compile(checkpointer=checkpointer, store=store)
