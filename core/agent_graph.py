@@ -18,17 +18,14 @@ from langgraph.types import Command, interrupt, Checkpointer, StreamWriter
 from langgraph.store.base import BaseStore
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver, AsyncRedisCluster
 
-from tools.web_tools import get_web_tools
-from tools.file_search_tools import get_file_search_tools
-from tools.shell_tools import my_shell_tool
-from tools.planning import todo_tool, TodoManager
+from tools import *
 from langchain.agents import AgentState
 from langchain.tools import BaseTool
 from functools import reduce
 import operator
 from utils.rocketmq_util import MemoryMsg
 
-from config.container import get_redis, get_kimi_model, get_intention_model, get_rocketmq_producer, cleanup_resources
+from config.container import get_redis, get_kimi_model, get_intention_model, get_rocketmq_producer, cleanup_resources, skill_loader
 from dao.user_info import UserInfo
 from config.tortoise_conf import init_db, close_db
 from langchain_ollama import ChatOllama
@@ -63,13 +60,16 @@ def create_agent(
         checkpointer: Checkpointer = None,
         store: BaseStore = None):
     # 获取工具
-    tools = get_web_tools() + [my_shell_tool, todo_tool] + get_file_search_tools()
+    tools = get_web_tools() + [my_shell_tool, todo_tool, load_skill] + get_file_search_tools()
 
     #  使用依赖注入获取 LLM (自动复用单例)
     llm_with_tools = llm.bind_tools(tools=tools, parallel_tool_calls=True)
 
     #  使用依赖注入获取 MQ 生产者 (自动复用单例)
     producer = get_rocketmq_producer()
+
+    # 加载skill
+    skills = skill_loader()
 
     async def before_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         messages = state.get("messages")
@@ -95,6 +95,9 @@ def create_agent(
 - 优先使用glob/grep工具，尽量不使用shell工具
 - 回答应当简洁，不要废话
 - 必须先拆分任务，先写todo后执行
+
+**可用技能**
+{skills.get_descriptions()}
 """)
         if messages and isinstance(messages[0], SystemMessage):
             messages[0] = sys_msg
@@ -307,7 +310,7 @@ async def main():
         "configurable": {
             "thread_id": "1"  # 用于人机协作
         },
-        "recursion_limit": 20  # 限制递归深度
+        "recursion_limit": 50  # 限制递归深度
     }
 
     try:

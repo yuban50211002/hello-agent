@@ -13,6 +13,7 @@ from config.settings import AppSettings, get_settings
 from llm.kimi_chat_model import create_kimi_chat_model
 from utils.rocketmq_util import RocketMQProducer, RocketMQConsumer
 from langchain_ollama import ChatOllama
+from config.skills import SkillLoader
 
 
 class Container(containers.DeclarativeContainer):
@@ -71,12 +72,20 @@ class Container(containers.DeclarativeContainer):
         consumer_group="test-group"
     )
 
+    skill_loader = providers.Singleton(
+        SkillLoader,
+        skills_dir="~/.my_agent/workspace/skills"
+    )
+
 
 # 全局容器实例
 container = Container()
 
 
 # ============ 便捷函数 ============
+
+def skill_loader():
+    return container.skill_loader()
 
 def get_redis() -> redis.Redis:
     """获取 Redis 客户端 (类似 Spring 的 @Autowired)"""
