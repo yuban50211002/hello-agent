@@ -1,34 +1,40 @@
-
 import pickle
 import asyncio
 import json
 import operator
 import os
-from datetime import datetime
 import platform
+import operator
+from datetime import datetime
 from typing import List, Dict, Any, Optional, TypedDict, Annotated, Sequence, Union, Required
+from functools import reduce
+from pydantic import BaseModel, Field
+
+from langchain.agents import AgentState
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_core.runnables.base import RunnableConfig
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
-from langgraph.graph.message import add_messages
 from langgraph.types import Command, interrupt, Checkpointer, StreamWriter
 from langgraph.store.base import BaseStore
-from langgraph.checkpoint.redis.aio import AsyncRedisSaver, AsyncRedisCluster
 
 from tools import *
-from langchain.agents import AgentState
-from langchain.tools import BaseTool
-from functools import reduce
-import operator
 from utils.rocketmq_util import MemoryMsg
-
-from config.container import get_redis, get_kimi_model, get_intention_model, get_rocketmq_producer, cleanup_resources, skill_loader
+from config.container import skill_loader, get_redis_client
 from dao.user_info import UserInfo
-from config.tortoise_conf import init_db, close_db
-from langchain_ollama import ChatOllama
+
+
+class AllowListSchema(BaseModel):
+    value: Optional[bool] = Field(default=None)
+
+
+def allow_list_reducer(old: AllowListSchema, new: AllowListSchema) -> bool:
+    if new.value is None:
+        return old.value
+    else:
+        return new.value
 
 
 def user_reducer(old_value: UserInfo, new_value: UserInfo) -> UserInfo:
@@ -52,6 +58,7 @@ class MyState(AgentState):
     query: Annotated[str, (lambda old, new: new if new else old)]
     total_tokens: Annotated[int, tokens_reducer]
     todo: Annotated[TodoManager, todo_reducer]
+    allow_list: Annotated[AllowListSchema, allow_list_reducer]
 
 
 def create_agent(
@@ -60,16 +67,15 @@ def create_agent(
         checkpointer: Checkpointer = None,
         store: BaseStore = None):
     # 获取工具
-    tools = get_web_tools() + [my_shell_tool, todo_tool, load_skill] + get_file_search_tools()
+    tools = get_web_tools() + [my_shell_tool, load_skill] + [create_task, update_task, task_list, task_detail] + get_file_search_tools()
 
     #  使用依赖注入获取 LLM (自动复用单例)
     llm_with_tools = llm.bind_tools(tools=tools, parallel_tool_calls=True)
 
-    #  使用依赖注入获取 MQ 生产者 (自动复用单例)
-    producer = get_rocketmq_producer()
+    # producer = get_rocketmq_producer()
 
     # 加载skill
-    skills = skill_loader()
+    skills = skill_loader
 
     async def before_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         messages = state.get("messages")
@@ -88,16 +94,17 @@ def create_agent(
         sys_msg = SystemMessage(content=f"""你是一个智能助手，可以帮助用户完成各种任务。
 
 **重要规则**：
-- 你的信息是过时的，任何回答都应该注意当前时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-- 正常对话不需要调用任何工具
+- 你的信息是过时的，任何回答都应该注意当前时间
 - 如果工具调用失败，不要重试，直接向用户说明情况即可
 - 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
-- 优先使用glob/grep工具，尽量不使用shell工具
+- 优先使用 glob/grep 工具，尽量不使用 shell 工具
 - 回答应当简洁，不要废话
-- 必须先拆分任务，先写todo后执行
 
 **可用技能**
 {skills.get_descriptions()}
+
+**当前时间**
+{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """)
         if messages and isinstance(messages[0], SystemMessage):
             messages[0] = sys_msg
@@ -107,7 +114,8 @@ def create_agent(
         return {"user_info": user_info,
                 "messages": [HumanMessage(content=query)],
                 "total_tokens": "RESET",
-                "todo": TodoManager(items=[], rounds_since_todo=0)
+                "todo": TodoManager(items=[], rounds_since_todo=0),
+                "allow_list": AllowListSchema(value=False)
                 }
 
     async def agent_node(state: MyState, writer: StreamWriter):
@@ -126,11 +134,15 @@ def create_agent(
             return Command(goto="after_agent")
         if not (tool_calls := last_message.tool_calls):
             return Command(goto="after_agent")
+        if state.get("allow_list", False):
+            return Command(goto="tools")
         tool_call_names = interrupt_tools.intersection(tool_call["name"] for tool_call in tool_calls)
         if tool_call_names:
             decision = interrupt(f"\n\n是否允许使用 {tool_call_names} ？同意(y)或说明原因：")
-            if decision.strip().lower() == "y":
+            if (decision := decision.strip().lower()) == "y":
                 return Command(goto="tools")
+            elif decision == "yy":
+                return Command(goto="tools", update={"allow_list": AllowListSchema(value=True)})
             else:
                 rejected_tools = []
                 for tool_call in tool_calls:
@@ -151,14 +163,15 @@ def create_agent(
                 last_ai_msg = msg
                 break
         call_count = len(last_ai_msg.tool_calls)
-        todo_msgs: list[ToolMessage] = [msg for msg in messages[-call_count:] if msg.name == "todo_tool"]
+        todo_msgs: list[ToolMessage] = [msg for msg in messages[-call_count:] if msg.name in ["update_task"]]
         if todo_msgs:
             todo_manager.rounds_since_todo = 0
         else:
             todo_manager.rounds_since_todo += 1
 
         if todo_manager.rounds_since_todo >= 3:
-            return {"messages": [HumanMessage(content="<reminder>Update your todos.</reminder>")]}
+            return {"messages": [HumanMessage(content="<reminder>Update your tasks.</reminder>")]}
+        pass
     
     def after_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         messages = state.get("messages", [])
@@ -178,7 +191,7 @@ def create_agent(
         msg = MemoryMsg(session_id=config.get("configurable", {}).get("thread_id", ""),
                         chat_history=history_text)
 
-        producer.send(msg.model_dump_json())
+        # producer.send(msg.model_dump_json())
         print(f"\n\ntoken使用量: {state.get('total_tokens', 0)}")
 
     # 构建图
@@ -259,74 +272,6 @@ async def deal_stream(chunk):
             print(msg.content, end='', flush=True)
 
 
-class BaseToolsNode:
-    """工具节点，可以并发执行多个工具"""
-    def __init__(self, tools: list[BaseTool]):
-        self.tools_by_name = {tool.name: tool for tool in tools}
-        pass
-
-    async def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
-        tool_msgs = await self.invoke_tools(state)
-        return {"messages": tool_msgs}
-
-    async def invoke_tools(self, state: dict[str, Any]) -> list[ToolMessage]:
-        """
-        并发执行多个工具
-        asyncio.gather:
-        1. 按输入顺序返回执行结果
-        2. 任意任务失败取消全部任务
-        """
-        async def invoke_single_tool(tool_call: dict[str, Any]) -> ToolMessage:
-            """异步执行单个工具"""
-            if not (tool := tools_by_name.get(tool_call["name"])):
-                raise KeyError("工具不存在")
-            if hasattr(tool, "ainvoke"):
-                tool_result = await tool.ainvoke(input=tool_call["args"])
-            else:
-                event_loop = asyncio.get_event_loop()
-                tool_result = await event_loop.run_in_executor(None,  # 默认线程池
-                                                               tool.invoke, tool_call["args"])
-            return ToolMessage(content=json.dumps(tool_result, ensure_ascii=False),
-                               tool_call_id=tool_call["id"],
-                               name=tool_call["name"])
-
-        try:
-            if not (messages := state.get("messages")):
-                return []
-            ai_msg = messages[-1]
-            tool_calls = ai_msg.tool_calls
-            tools_by_name = self.tools_by_name
-            result = await asyncio.gather(*[invoke_single_tool(tool_call) for tool_call in tool_calls])
-            return result
-        except Exception as e:
-            raise RuntimeError("并发执行工具运行时发生错误") from e
-
-
-async def main():
-    # 确保 data 目录存在
-    os.makedirs("./data", exist_ok=True)
-    
-    config = {
-        "configurable": {
-            "thread_id": "1"  # 用于人机协作
-        },
-        "recursion_limit": 50  # 限制递归深度
-    }
-
-    try:
-        get_rocketmq_producer().start()
-        await init_db()
-        async with (AsyncRedisSaver.from_conn_string(redis_client=get_redis(), ttl={"default_ttl": 120}) as checkpointer):
-            await checkpointer.asetup()
-            agent = create_agent(llm=get_kimi_model(), interrupt_tools={"my_shell_tool"}, checkpointer=checkpointer)
-            await chat(agent=agent, config=config)
-    except Exception as e:
-        raise RuntimeError("运行过程发生错误") from e
-    finally:
-        await cleanup_resources()
-        await close_db()
-
-
 def _split_into_rounds(messages: List[BaseMessage]) -> List[List[BaseMessage]]:
     """将消息列表分割成轮次，每轮以HumanMessage开头"""
     rounds = []
@@ -385,7 +330,7 @@ def micro_compact(messages: list[BaseMessage], keep_recent: int = 3):
 
 
 async def get_user(session_id):
-    redis = get_redis()
+    redis = get_redis_client()
     user_key = f"user_info:{session_id}"
     user_info_bytes = await redis.get(user_key)
     if user_info_bytes:
@@ -397,7 +342,3 @@ async def get_user(session_id):
         user_info = result[0]
         await redis.setex(f"user_info:{session_id}", 1800, pickle.dumps(user_info))
     return user_info
-
-
-if __name__ == '__main__':
-    asyncio.run(main())

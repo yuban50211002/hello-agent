@@ -1,83 +1,34 @@
-"""
-AI Agent 应用主入口
-
-这是重构后的应用入口，使用分层架构：
-- core/: 核心业务逻辑
-- memory/: 记忆管理
-- tools/: 工具层
-- llm/: LLM 交互层
-- config/: 配置管理
-"""
-
 import asyncio
-import sys
-from pathlib import Path
 
-from core.agent_v5 import SimpleAgentV5
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 
-# 添加项目根目录到 Python 路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
-
-from config.settings import get_settings
-
-def main():
-    asyncio.run(main_async())
-
-async def main_async():
-    """主函数"""
-    print("=" * 60)
-    print("🤖 AI Agent 启动中...")
-    print("=" * 60)
-    
-    try:
-        # 加载配置
-        settings = get_settings()
-        
-        print(f"📋 配置信息:")
-        print(f"   项目: {settings.project_name} v{settings.version}")
-        print(f"   LLM: {settings.llm.model_name}")
-        print(f"   记忆类型: 三层记忆中间件（自动管理）")
-        print(f"   记忆状态: {'启用' if settings.memory.enable else '禁用'}")
-        print(f"   嵌入模型: {settings.memory.embedding_provider}")
-        print(f"   摘要生成: TextRank 算法")
-        print()
-        
-        # 🔥 初始化 Agent V5（可选工具模式）
-        agent = SimpleAgentV5(
-            model_name=settings.llm.model_name,
-            memory_path=settings.memory.persist_path,
-        )
-        
-        # 异步初始化（加载 MCP 工具）
-        await agent.initialize()
-        
-        print("\n✅ Agent 初始化成功！")
-        print("=" * 60)
-        
-        # 启动交互式对话
-        await agent.chat()
-        
-    except KeyboardInterrupt:
-        print("\n\n👋 再见！")
-    except Exception as e:
-        print(f"\n❌ 错误: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+from core.agent_graph import create_agent, chat
+from config.container import get_redis_client, kimi_model, cleanup_resources
+from config.tortoise_conf import init_db, close_db
 
 
-if __name__ == "__main__":
-    # 运行主函数
-    from core.agent_graph import create_agent, chat
-
+async def main():
     config = {
         "configurable": {
             "thread_id": "1"  # 用于人机协作
         },
-        "recursion_limit": 10  # 限制递归深度
+        "recursion_limit": 50  # 限制递归深度
     }
 
-    agent = create_agent(interrupt_tools={"my_shell_tool"})
+    try:
+        # get_rocketmq_producer().start()
+        await init_db()
+        async with (AsyncRedisSaver.from_conn_string(redis_client=get_redis_client(),
+                                                     ttl={"default_ttl": 120}) as checkpointer):
+            await checkpointer.asetup()
+            agent = create_agent(llm=kimi_model, interrupt_tools={"my_shell_tool"}, checkpointer=checkpointer)
+            await chat(agent=agent, config=config)
+    except Exception as e:
+        raise RuntimeError("运行过程发生错误") from e
+    finally:
+        await cleanup_resources()
+        await close_db()
 
-    asyncio.run(chat(agent=agent, config=config))
+
+if __name__ == '__main__':
+    asyncio.run(main())

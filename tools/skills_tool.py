@@ -10,4 +10,4 @@ class SkillSchema(BaseModel):
 
 @tool(args_schema=SkillSchema, parse_docstring=True)
 def load_skill(name: str):
-    return skill_loader().get_content(name=name)
+    return skill_loader.get_content(name=name)

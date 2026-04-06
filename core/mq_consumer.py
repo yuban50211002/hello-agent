@@ -1,16 +1,31 @@
 import asyncio
 import pickle
 
+from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from rocketmq import Message
-from config.container import get_intention_model, get_redis, get_rocketmq_consumer, get_kimi_model
+from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage, SystemMessage
 
-from dao.user_info import UserInfo
-from utils.rocketmq_util import MemoryMsg
+from config.container import get_redis_client, kimi_model, config
+from utils.rocketmq_util import RocketMQConsumer, MemoryMsg
 
-from datetime import datetime
+
+intention_model = ChatOllama(
+    model=config.llm.local_model,
+    validate_model_on_init=True,
+    temperature=0.1,
+    num_predict=512,
+)
+
+
+# ============ RocketMQ ============
+rocketmq_consumer = RocketMQConsumer(
+    endpoints="127.0.0.1:9080",
+    topic="test-topic",
+    consumer_group="test-group"
+)
 
 
 class IntentSlots(BaseModel):
@@ -35,10 +50,7 @@ class IntentResult(BaseModel):
 
 
 async def process_message(msg: Message):
-    # 意图识别模型
-    intention_model = get_intention_model()
-    # intention_model = get_kimi_model()
-    redis = get_redis()
+    redis = get_redis_client()
     memory_msg = MemoryMsg.model_validate_json(msg.body.decode('utf-8'))
 
     if not (session_id := memory_msg.session_id):
@@ -83,9 +95,8 @@ async def process_message(msg: Message):
 
 
 async def main():
-    consumer = get_rocketmq_consumer()
-    consumer.start()
-    await consumer.consume_loop(callback=process_message)
+    rocketmq_consumer.start()
+    await rocketmq_consumer.consume_loop(callback=process_message)
 
 
 if __name__ == '__main__':
