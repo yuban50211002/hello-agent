@@ -67,7 +67,7 @@ def create_agent(
         checkpointer: Checkpointer = None,
         store: BaseStore = None):
     # 获取工具
-    tools = get_web_tools() + [my_shell_tool, load_skill] + [create_task, update_task, task_list, task_detail] + get_file_search_tools()
+    tools = get_web_tools() + [my_shell_tool, load_skill] + FILE_EDIT_TOOLS + [create_task, update_task, task_list, task_detail] + get_file_search_tools()
 
     #  使用依赖注入获取 LLM (自动复用单例)
     llm_with_tools = llm.bind_tools(tools=tools, parallel_tool_calls=True)
