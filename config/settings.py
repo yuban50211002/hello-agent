@@ -1,8 +1,5 @@
 """
 配置管理模块
-
-使用 Pydantic Settings 管理应用配置
-类似 Spring Boot 的 application.yml + @ConfigurationProperties
 """
 
 import os
@@ -10,6 +7,7 @@ from typing import Optional
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
+from pathlib import Path
 
 # 加载环境变量
 load_dotenv()
@@ -90,6 +88,10 @@ class AppSettings(BaseSettings):
     memory: MemorySettings = MemorySettings()
     mcp: MCPSettings = MCPSettings()
     redis: RedisSettings = RedisSettings()
+
+    # 工作目录
+    working_dir: str = str(Path.cwd())
+    workspace: str = str(Path(os.getenv("WORKSPACE")).expanduser())
     
     class Config:
         env_prefix = "APP_"
@@ -97,12 +99,14 @@ class AppSettings(BaseSettings):
     @classmethod
     def load(cls):
         """加载配置"""
-        return cls(
+        res = cls(
             llm=LLMSettings.from_env(),
             memory=MemorySettings(),
             mcp=MCPSettings(),
             redis=RedisSettings()
         )
+        Path(res.workspace).mkdir(parents=True, exist_ok=True)
+        return res
 
 
 # 全局配置实例

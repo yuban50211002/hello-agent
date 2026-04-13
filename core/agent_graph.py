@@ -22,8 +22,10 @@ from langgraph.store.base import BaseStore
 
 from tools import *
 from utils.rocketmq_util import MemoryMsg
-from config.container import skill_loader, get_redis_client
+from config.container import skill_loader, get_redis_client, get_settings
 from dao.user_info import UserInfo
+
+sys_config = get_settings()
 
 
 class AllowListSchema(BaseModel):
@@ -98,10 +100,14 @@ def create_agent(
 - 如果工具调用失败，不要重试，直接向用户说明情况即可
 - 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
 - 优先使用 glob/grep 工具，尽量不使用 shell 工具
+- The working directory persists between commands, but shell state does not.
 - 回答应当简洁，不要废话
 
 **可用技能**
 {skills.get_descriptions()}
+
+**工作目录**
+{sys_config.working_dir}
 
 **当前时间**
 {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
