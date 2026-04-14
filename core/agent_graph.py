@@ -130,8 +130,13 @@ def create_agent(
             writer(chunk)  # 实时流式发送每个chunk
             chunks.append(chunk)
         combined_chunk = reduce(operator.add, chunks)
+
+        usage = combined_chunk.usage_metadata
+        cache_read = usage.get("input_token_details", {}).get("cache_read", 0)
+        total_tokens = usage.get("total_tokens", 0)
+
         return {"messages": [combined_chunk],
-                "total_tokens": combined_chunk.usage_metadata.get("total_tokens", 0)
+                "total_tokens": total_tokens - cache_read
                 }
 
     def interrupt_before_tool(state: MyState) -> Command:

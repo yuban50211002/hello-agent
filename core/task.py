@@ -15,18 +15,18 @@ class TaskManager:
 
     def _max_id(self) -> int:
         with self._lock:
-            ids = [int(f.stem.split("_")[1]) for f in self.dir.glob("task_*.json")]
+            ids = [int(f.stem.split("_")[1]) for f in self.dir.glob("task_*.jsonl")]
             return max(ids) if ids else 0
 
     def _load(self, task_id: int) -> dict:
-        path = self.dir / f"task_{task_id}.json"
+        path = self.dir / f"task_{task_id}.jsonl"
         if not path.exists():
             raise ValueError(f"Task {task_id} not found")
         return json.loads(path.read_text())
 
     def _save(self, task: dict):
-        path = self.dir / f"task_{task['id']}.json"
-        path.write_text(json.dumps(task, indent=2, ensure_ascii=False))
+        path = self.dir / f"task_{task['id']}.jsonl"
+        path.write_text(json.dumps(task, ensure_ascii=False, separators=(',', ':')))
 
     def create(self, subject: str, description: str = "") -> str:
         with self._lock:
@@ -36,11 +36,11 @@ class TaskManager:
             }
             self._save(task)
             self._next_id += 1
-            return json.dumps(task, indent=2, ensure_ascii=False)
+            return json.dumps(task, separators=(',', ':'), ensure_ascii=False)
 
     def get(self, task_id: int) -> str:
         with self._lock:
-            return json.dumps(self._load(task_id), indent=2, ensure_ascii=False)
+            return json.dumps(self._load(task_id), separators=(',', ':'), ensure_ascii=False)
 
     def update(self, task_id: int, status: str = None,
                add_blocked_by: list = None, add_blocks: list = None) -> str:
@@ -67,11 +67,11 @@ class TaskManager:
                     except ValueError:
                         pass
             self._save(task)
-            return json.dumps(task, indent=2, ensure_ascii=False)
+            return json.dumps(task, separators=(',', ':'), ensure_ascii=False)
 
     def _clear_dependency(self, completed_id: int):
         """Remove completed_id from all other tasks' blockedBy lists."""
-        for f in self.dir.glob("task_*.json"):
+        for f in self.dir.glob("task_*.jsonl"):
             task = json.loads(f.read_text())
             if completed_id in task.get("blockedBy", []):
                 task["blockedBy"].remove(completed_id)
@@ -80,7 +80,7 @@ class TaskManager:
     def list_all(self) -> str:
         tasks = []
         with self._lock:
-            for f in sorted(self.dir.glob("task_*.json")):
+            for f in sorted(self.dir.glob("task_*.jsonl")):
                 tasks.append(json.loads(f.read_text()))
         if not tasks:
             return "No tasks."

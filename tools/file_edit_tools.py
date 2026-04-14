@@ -123,7 +123,12 @@ def file_read(file_path: str, offset: Optional[int] = None, limit: Optional[int]
             end_idx = total_lines
 
         selected_lines = lines[start_idx:end_idx]
-        selected_content = "\n".join(selected_lines)
+        # 添加行号，格式: "1→content"
+        numbered_lines = []
+        for i, line in enumerate(selected_lines, start=start_idx + 1):
+            line_num_str = f"{i:}→"
+            numbered_lines.append(f"{line_num_str}{line}")
+        selected_content = "\n".join(numbered_lines)
 
         return {
             "success": True,
