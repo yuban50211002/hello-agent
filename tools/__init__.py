@@ -8,7 +8,7 @@ from .shell_tools import (
 )
 from .todo_tool import todo_tool, TodoManager
 from .skills_tool import load_skill
-from .task_tools import create_task, update_task, task_list, task_detail
+from .task_tools import TASK_MANAGE_TOOLS
 from .file_edit_tools import (
     FILE_EDIT_TOOLS,
     file_read,
@@ -26,10 +26,7 @@ __all__ = [
     "todo_tool",
     "TodoManager",
     "load_skill",
-    "create_task",
-    "update_task",
-    "task_list",
-    "task_detail",
+    "TASK_MANAGE_TOOLS",
     "FILE_EDIT_TOOLS",
     "file_read",
     "file_write",

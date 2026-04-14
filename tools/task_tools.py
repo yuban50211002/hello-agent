@@ -41,5 +41,8 @@ def task_list():
 
 
 @tool(args_schema=DetailSchema, parse_docstring=True)
-def task_detail(task_id: int):
+def task_get(task_id: int):
     return task_manager.get(task_id=task_id)
+
+
+TASK_MANAGE_TOOLS = [create_task, update_task, task_list, task_get]

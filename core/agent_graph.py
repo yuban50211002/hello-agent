@@ -5,6 +5,7 @@ import operator
 import os
 import platform
 import operator
+from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, TypedDict, Annotated, Sequence, Union, Required
 from functools import reduce
@@ -22,7 +23,7 @@ from langgraph.store.base import BaseStore
 
 from tools import *
 from utils.rocketmq_util import MemoryMsg
-from config.container import skill_loader, get_redis_client, get_settings
+from config.container import skill_loader, get_redis_client, get_settings, task_manager
 from dao.user_info import UserInfo
 
 sys_config = get_settings()
@@ -63,13 +64,21 @@ class MyState(AgentState):
     allow_list: Annotated[AllowListSchema, allow_list_reducer]
 
 
+def load_constraints(directory="constraints"):
+    parts = []
+    for file in sorted(Path(directory).glob("*.md")):
+        if file.name != "README.md":
+            parts.append(file.read_text())
+    return "\n\n".join(parts)
+
+
 def create_agent(
         llm: BaseChatModel,
         interrupt_tools: set[str] = (),
         checkpointer: Checkpointer = None,
         store: BaseStore = None):
     # 获取工具
-    tools = get_web_tools() + [my_shell_tool, load_skill] + FILE_EDIT_TOOLS + [create_task, update_task, task_list, task_detail] + get_file_search_tools()
+    tools = get_web_tools() + [my_shell_tool, load_skill] + FILE_EDIT_TOOLS + TASK_MANAGE_TOOLS + get_file_search_tools()
 
     #  使用依赖注入获取 LLM (自动复用单例)
     llm_with_tools = llm.bind_tools(tools=tools, parallel_tool_calls=True)
@@ -78,6 +87,9 @@ def create_agent(
 
     # 加载skill
     skills = skill_loader
+
+    # 加载约束
+    constraints = load_constraints()
 
     async def before_agent(state: MyState, config: RunnableConfig, store: BaseStore):
         messages = state.get("messages")
@@ -93,23 +105,15 @@ def create_agent(
         query = state.get("query")
 
         # 更新系统消息
-        sys_msg = SystemMessage(content=f"""你是一个智能助手，可以帮助用户完成各种任务。
+        sys_msg = SystemMessage(content=f"""{constraints}
 
-**重要规则**：
-- 你的信息是过时的，任何回答都应该注意当前时间
-- 如果工具调用失败，不要重试，直接向用户说明情况即可
-- 智能判断什么时候需要上网（最新信息、实时数据、不确定的知识才查询）
-- 优先使用 glob/grep 工具，尽量不使用 shell 工具
-- The working directory persists between commands, but shell state does not.
-- 回答应当简洁，不要废话
-
-**可用技能**
+# 可用技能
 {skills.get_descriptions()}
 
-**工作目录**
+# 工作目录
 {sys_config.working_dir}
 
-**当前时间**
+# 当前时间
 {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """)
         if messages and isinstance(messages[0], SystemMessage):
@@ -138,6 +142,9 @@ def create_agent(
         return {"messages": [combined_chunk],
                 "total_tokens": total_tokens - cache_read
                 }
+
+    def after_model(state: MyState):
+        pass
 
     def interrupt_before_tool(state: MyState) -> Command:
         last_message = state["messages"][-1]
@@ -181,28 +188,16 @@ def create_agent(
             todo_manager.rounds_since_todo += 1
 
         if todo_manager.rounds_since_todo >= 3:
-            return {"messages": [HumanMessage(content="<reminder>Update your tasks.</reminder>")]}
+            return {"messages": [AIMessage(content="现在更新任务状态和依赖")]}
         pass
     
     def after_agent(state: MyState, config: RunnableConfig, store: BaseStore):
-        messages = state.get("messages", [])
-        rounds = _split_into_rounds(messages)
+        last_message = state["messages"][-1]
+        if isinstance(last_message, AIMessage):
+            if last_message.response_metadata.get("finish_reason") == "stop" and task_manager.uncompleted_tasks():
+                return Command(goto="agent",
+                               update={"messages": [AIMessage(content="发现未完成任务，检查任务列表")]})
 
-        history_text = ""
-        for round_idx, round_messages in enumerate(rounds[-2:], 1):
-            for msg in round_messages:
-                if isinstance(msg, HumanMessage):
-                    history_text += f"用户: {msg.content}\n"
-                elif isinstance(msg, AIMessage):
-                    history_text += f"助手: {msg.content}\n"
-            history_text += "\n"  # 轮次之间空一行
-
-        if not history_text.strip():
-            history_text = "无对话历史"
-        msg = MemoryMsg(session_id=config.get("configurable", {}).get("thread_id", ""),
-                        chat_history=history_text)
-
-        # producer.send(msg.model_dump_json())
         print(f"\n\ntoken使用量: {state.get('total_tokens', 0)}")
 
     # 构建图
@@ -210,6 +205,7 @@ def create_agent(
     # 添加节点
     workflow.add_node("before_agent", before_agent)
     workflow.add_node("agent", agent_node)
+    workflow.add_node("after_model", after_model)
     workflow.add_node("interrupt", interrupt_before_tool)
     # tools_node = BaseToolsNode(tools)
     tools_node = ToolNode(tools=tools)
@@ -219,7 +215,8 @@ def create_agent(
     # 添加边
     workflow.set_entry_point("before_agent")
     workflow.add_edge("before_agent", "agent")
-    workflow.add_edge("agent", "interrupt")
+    workflow.add_edge("agent", "after_model")
+    workflow.add_edge("after_model", "interrupt")
     workflow.add_edge("tools", "after_tool")
     workflow.add_edge("after_tool", "agent")
     workflow.add_edge("after_agent", END)

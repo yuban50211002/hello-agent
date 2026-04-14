@@ -24,6 +24,15 @@ class TaskManager:
             raise ValueError(f"Task {task_id} not found")
         return json.loads(path.read_text())
 
+    def uncompleted_tasks(self) -> list:
+        tasks = []
+        with self._lock:
+            for f in sorted(self.dir.glob("task_*.jsonl")):
+                task: dict = json.loads(f.read_text())
+                if task.get("status") != "completed":
+                    tasks.append(task)
+        return tasks
+
     def _save(self, task: dict):
         path = self.dir / f"task_{task['id']}.jsonl"
         path.write_text(json.dumps(task, ensure_ascii=False, separators=(',', ':')))
@@ -36,7 +45,9 @@ class TaskManager:
             }
             self._save(task)
             self._next_id += 1
-            return json.dumps(task, separators=(',', ':'), ensure_ascii=False)
+            task_detail = json.dumps(task, separators=(',', ':'), ensure_ascii=False)
+            reminder = "<reminder>You should update task status and dependencies now.</reminder>"
+            return f"{task_detail}\n\n{reminder}"
 
     def get(self, task_id: int) -> str:
         with self._lock:
