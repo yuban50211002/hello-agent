@@ -59,11 +59,14 @@ class TaskManager:
             task = self._load(task_id)
             if status:
                 if status not in ("pending", "in_progress", "completed"):
-                    raise ValueError(f"Invalid status: {status}")
+                    return f"[ERROR] Invalid status: {status}"
                 task["status"] = status
                 # When a task is completed, remove it from all other tasks' blockedBy
                 if status == "completed":
                     self._clear_dependency(task_id)
+                elif status == "in_progress":
+                    if blockedBy := task["blockedBy"]:
+                        return f"[ERROR] Task_{task_id} is blocked by tasks [{blockedBy}].Make sure they are completed."
             if add_blocked_by:
                 task["blockedBy"] = list(set(task["blockedBy"] + add_blocked_by))
             if add_blocks:
