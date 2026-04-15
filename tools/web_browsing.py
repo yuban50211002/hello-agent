@@ -127,13 +127,13 @@ class WebBrowser:
         search_results = self.search(query, num_results=3)
         
         if not search_results or 'error' in search_results[0]:
-            return f"❌ 搜索失败: {search_results[0].get('error', '未知错误')}"
+            return f"搜索失败: {search_results[0].get('error', '未知错误')}"
         
         # 2. 构建返回内容
-        output = [f"🔍 搜索结果：「{query}」\n"]
+        output = [f"搜索结果：「{query}」\n"]
         
         # 显示搜索结果
-        output.append("📋 找到以下结果：\n")
+        output.append("找到以下结果：\n")
         for i, result in enumerate(search_results, 1):
             output.append(f"{i}. {result['title']}")
             output.append(f"   链接: {result['url']}")
@@ -144,12 +144,12 @@ class WebBrowser:
         # 3. 获取第一个页面的详细内容
         if search_results:
             first_url = search_results[0]['url']
-            output.append(f"\n📄 正在获取页面内容: {first_url}\n")
+            output.append(f"\n正在获取页面内容: {first_url}\n")
             
             page_content = self.get_page_content(first_url, max_length=3000)
             
             if 'error' in page_content:
-                output.append(f"❌ 获取失败: {page_content['error']}")
+                output.append(f"获取失败: {page_content['error']}")
             else:
                 output.append(f"标题: {page_content.get('title', 'N/A')}")
                 output.append(f"内容长度: {page_content['length']} 字符")

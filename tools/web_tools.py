@@ -80,10 +80,10 @@ def web_search(query: str, num_results: int = 5) -> str:
     results = browser.search(query, num_results=min(num_results, 10))
     
     if not results or 'error' in results[0]:
-        return f"❌ 搜索失败: {results[0].get('error', '未知错误')}"
+        return f"搜索失败: {results[0].get('error', '未知错误')}"
     
     # 格式化输出
-    output = [f"🔍 搜索结果：「{query}」\n"]
+    output = [f"搜索结果：「{query}」\n"]
     for i, result in enumerate(results, 1):
         output.append(f"{i}. {result['title']}")
         output.append(f"   链接: {result['url']}")
