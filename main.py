@@ -12,7 +12,7 @@ async def main():
         "configurable": {
             "thread_id": "1"  # 用于人机协作
         },
-        "recursion_limit": 50  # 限制递归深度
+        "recursion_limit": 500  # 限制递归深度
     }
 
     try:

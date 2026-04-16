@@ -6,7 +6,7 @@ from .shell_tools import (
     ShellExecutor,
     get_shell_executor,
 )
-from .todo_tool import todo_tool, TodoManager
+from .todo_tool import todo_tool
 from .skills_tool import load_skill
 from .task_tools import TASK_MANAGE_TOOLS
 from .file_edit_tools import (
@@ -15,6 +15,7 @@ from .file_edit_tools import (
     file_write,
     file_edit,
 )
+from .team_tools import MANAGER_TOOLS, TEAMMATE_TOOLS
 
 __all__ = [
     "get_web_tools",
@@ -24,11 +25,12 @@ __all__ = [
     "ShellExecutor",
     "get_shell_executor",
     "todo_tool",
-    "TodoManager",
     "load_skill",
     "TASK_MANAGE_TOOLS",
     "FILE_EDIT_TOOLS",
     "file_read",
     "file_write",
     "file_edit",
+    "MANAGER_TOOLS",
+    "TEAMMATE_TOOLS"
 ]

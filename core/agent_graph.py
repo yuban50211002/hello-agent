@@ -1,15 +1,9 @@
 import pickle
-import asyncio
-import json
-import operator
-import os
-import platform
 import operator
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any, Optional, TypedDict, Annotated, Sequence, Union, Required
+from typing import List, Any, Annotated
 from functools import reduce
-from pydantic import BaseModel, Field
 
 from langchain.agents import AgentState
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
@@ -21,39 +15,12 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt, Checkpointer, StreamWriter
 from langgraph.store.base import BaseStore
 
+from core.reducer import user_reducer, AllowListSchema, tokens_reducer, todo_reducer, allow_list_reducer, TodoManager
 from tools import *
-from utils.rocketmq_util import MemoryMsg
 from config.container import skill_loader, get_redis_client, get_settings, task_manager
 from dao.user_info import UserInfo
 
 sys_config = get_settings()
-
-
-class AllowListSchema(BaseModel):
-    value: Optional[bool] = Field(default=None)
-
-
-def allow_list_reducer(old: AllowListSchema, new: AllowListSchema) -> bool:
-    if new.value is None:
-        return old.value
-    else:
-        return new.value
-
-
-def user_reducer(old_value: UserInfo, new_value: UserInfo) -> UserInfo:
-    return new_value if new_value and new_value.session_id else old_value
-
-
-def tokens_reducer(old: int, new: Union[int, str]) -> int:
-    if new == "RESET":
-        return 0
-    return old + new
-
-
-def todo_reducer(old: TodoManager, new: TodoManager) -> TodoManager:
-    return old.model_copy(update=new.model_dump(mode="json",
-                                                exclude_unset=True,
-                                                exclude_none=True))
 
 
 class MyState(AgentState):
@@ -78,7 +45,7 @@ def create_agent(
         checkpointer: Checkpointer = None,
         store: BaseStore = None):
     # 获取工具
-    tools = get_web_tools() + [my_shell_tool, load_skill] + FILE_EDIT_TOOLS + TASK_MANAGE_TOOLS + get_file_search_tools()
+    tools = get_web_tools() + [my_shell_tool, load_skill] + FILE_EDIT_TOOLS + TASK_MANAGE_TOOLS + get_file_search_tools() + MANAGER_TOOLS
 
     #  使用依赖注入获取 LLM (自动复用单例)
     llm_with_tools = llm.bind_tools(tools=tools, parallel_tool_calls=True)
@@ -275,7 +242,8 @@ async def deal_stream(chunk):
     if chunk["type"] == "custom":
         msg = chunk["data"]
         if reasoning := msg.additional_kwargs.get("reasoning_content"):
-            print(reasoning, end='', flush=True)
+            # print(reasoning, end='', flush=True)
+            pass
         else:
             print(msg.content, end='', flush=True)
 

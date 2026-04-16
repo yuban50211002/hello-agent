@@ -1,33 +1,21 @@
-import pickle
-import asyncio
-import json
-import operator
-import os
-import platform
-import operator
-from pathlib import Path
-from datetime import datetime
-from typing import List, Dict, Any, Optional, TypedDict, Annotated, Sequence, Union, Required
-from functools import reduce
-from pydantic import BaseModel, Field
 
-
-from core.agent_graph import create_agent, chat
-from config.container import get_redis_client, kimi_model, cleanup_resources
+from typing import Annotated
 
 from langchain.agents import AgentState
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_core.runnables.base import RunnableConfig
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import StateGraph, END
-from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
-from langgraph.types import Command, interrupt, Checkpointer, StreamWriter
+from langgraph.types import Command, Checkpointer, StreamWriter
 from langgraph.store.base import BaseStore
 
-from tools import *
-from config.container import skill_loader, get_redis_client, get_settings, task_manager
-from core.agent_graph import tokens_reducer, todo_reducer
+from core.reducer import tokens_reducer, todo_reducer, TodoManager
+from tools import (
+    get_web_tools, my_shell_tool, load_skill, FILE_EDIT_TOOLS,
+    TASK_MANAGE_TOOLS, get_file_search_tools, get_shell_executor
+)
+from config.container import skill_loader, get_settings
 
 sys_config = get_settings()
 
@@ -40,9 +28,10 @@ class TeammateState(AgentState):
     todo: Annotated[TodoManager, todo_reducer]
 
 
-def create_teammate(prompt: str, llm: BaseChatModel, checkpointer: Checkpointer = None):
-    # 获取工具
-    tools = get_web_tools() + [my_shell_tool, load_skill] + FILE_EDIT_TOOLS + TASK_MANAGE_TOOLS + get_file_search_tools()
+def create_teammate(role: str, name: str, llm: BaseChatModel, checkpointer: Checkpointer = None):
+    # 获取工具（延迟导入 TEAMMATE_TOOLS 避免循环导入）
+    from tools import TEAMMATE_TOOLS
+    tools = get_web_tools() + [my_shell_tool, load_skill] + FILE_EDIT_TOOLS + TASK_MANAGE_TOOLS + get_file_search_tools() + TEAMMATE_TOOLS
 
     #  使用依赖注入获取 LLM (自动复用单例)
     llm_with_tools = llm.bind_tools(tools=tools, parallel_tool_calls=True)
@@ -56,7 +45,7 @@ def create_teammate(prompt: str, llm: BaseChatModel, checkpointer: Checkpointer 
         query = state.get("query")
 
         # 更新系统消息
-        sys_msg = SystemMessage(content=f"""{prompt}
+        sys_msg = SystemMessage(content=f"""你的名字是{name}，在团队中扮演{role}角色。你可以和队友交流，接下来会交给你任务，请你完成它。
 
         # 可用技能
         {skills.get_descriptions()}

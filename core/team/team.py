@@ -6,19 +6,19 @@ from pathlib import Path
 from typing import Optional
 
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from langchain_core.messages import HumanMessage
 
-from config.container import get_redis_client
-from teammate_graph import create_teammate
-from llm.kimi_chat_model import create_kimi_chat_model
+from .teammate_graph import create_teammate
+from config.container import kimi_model
 
 
-VALID_MSG_TYPES = {
-    "message",               # 普通文本消息（s09 实现）
-    "broadcast",             # 群发给所有队友（s09 实现）
-    "shutdown_request",      # 请求优雅关闭（s10 预留）
-    "shutdown_response",     # 批准/拒绝关闭请求（s10 预留）
-    "plan_approval_response",  # 批准/拒绝计划（s10 预留）
-}
+VALID_MSG_TYPES = [
+    "message",                  # 普通文本消息（s09 实现）
+    "broadcast",                # 群发给所有队友（s09 实现）
+    "shutdown_request",         # 请求优雅关闭（s10 预留）
+    "shutdown_response",        # 批准/拒绝关闭请求（s10 预留）
+    "plan_approval_response"    # 批准/拒绝计划（s10 预留）
+]
 
 
 class TeammateManager:
@@ -27,10 +27,10 @@ class TeammateManager:
 
     {
       "team_name": "default",
-      "members": [
-        {"name": "alice", "role": "coder", "status": "working"},
-        {"name": "bob", "role": "tester", "status": "idle"}
-      ]
+      "members": {
+        "alice": {"name": "alice", "role": "coder", "status": "working"},
+        "bob": {"name": "bob", "role": "tester", "status": "idle"}
+      }
     }
     """
 
@@ -45,7 +45,7 @@ class TeammateManager:
     def _load_config(self) -> dict:
         if self.config_path.exists():
             return json.loads(self.config_path.read_text())
-        return {"team_name": "default", "members": []}  # 空团队
+        return {"team_name": "default", "members": {}}  # 空团队
 
     def _save_config(self):
         self.config_path.write_text(json.dumps(self.config, indent=2))  # 持久化到磁盘
@@ -62,7 +62,7 @@ class TeammateManager:
             else:
                 # 新队友，追加到成员列表
                 member = {"name": name, "role": role, "status": "working"}
-                self.config["members"].append(member)
+                self.config["members"][name] = member
             self._save_config()  # 写入 config.json
 
             # 关键：在新线程中启动 teammate_loop
@@ -76,15 +76,12 @@ class TeammateManager:
         thread.start()
         return f"Spawned '{name}' (role: {role})"
 
-    def _find_member(self, name) -> Optional[dict, None]:
+    def _find_member(self, name) -> Optional[dict]:
+        return self.config["members"].get(name)
+
+    def list_all(self):
         with self.lock:
-            config = self._load_config()
-        member = None
-        for m in config.get("members", []):
-            if m.get("name") == name:
-                member = m
-                break
-        return member
+            return list(self.config["members"].values())
 
     def _teammate_loop(self, name: str, role: str, prompt: str):
         async def arun():
@@ -93,23 +90,33 @@ class TeammateManager:
                 "configurable": {
                     "thread_id": thread_id
                 },
-                "recursion_limit": 50  # 限制递归深度
+                "recursion_limit": 500  # 限制递归深度
             }
+            # 在新线程中创建独立的 Redis 客户端，避免事件循环冲突
+            import redis.asyncio as redis
+            redis_client = redis.Redis(
+                host="localhost",
+                port=6379,
+                db=0,
+                decode_responses=False
+            )
             try:
-                async with (AsyncRedisSaver.from_conn_string(redis_client=get_redis_client(), ttl={"default_ttl": 120}) as checkpointer):
+                async with (AsyncRedisSaver.from_conn_string(redis_client=redis_client, ttl={"default_ttl": 120}) as checkpointer):
                     await checkpointer.asetup()
-                    llm = create_kimi_chat_model()
-                    teammate = create_teammate(prompt=prompt, llm=llm, checkpointer=checkpointer)
+                    teammate = create_teammate(name=name, role=role, llm=kimi_model, checkpointer=checkpointer)
                     for _ in range(10):
-                        msgs = message_bus.read_inbox(name=name)
-                        if msgs:
+                        received = message_bus.read_inbox(name=name)
+                        if received:
+                            msgs: list = [HumanMessage(content=json.dumps(m, ensure_ascii=False)) for m in received]
                             input_state = {
                                 "messages": msgs
                             }
-                            teammate.ainvoke(input=input_state, config=config)
-                        time.sleep(1)
-                    # todo
-                    # self._find_member(name)["status"] = "idle"
+                            await teammate.ainvoke(input=input_state, config=config)
+                        await asyncio.sleep(1)
+                    # 更新状态
+                    with self.lock:
+                        self._find_member(name)["status"] = "idle"
+                        self._save_config()
             except Exception as e:
                 raise RuntimeError(f"{thread_id}运行过程发生错误") from e
 

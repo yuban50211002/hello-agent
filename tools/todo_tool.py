@@ -1,24 +1,14 @@
+from typing import Annotated
 from pydantic import BaseModel, Field
-from typing import Literal, List, Annotated, Optional
-from langchain_core.tools import tool, InjectedToolCallId
+from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
-
-class TodoSchema(BaseModel):
-    """Single task."""
-    id: str
-    text: str = Field(description="task content")
-    status: Literal["pending", "in_progress", "completed"] = Field(description="task status")
+from core.reducer import TodoSchema, TodoManager
 
 
 class TodoList(BaseModel):
     """Update task list. Track progress on multi-step tasks."""
-    items: List[TodoSchema] = Field(default_factory=list, description="task list")
-
-
-class TodoManager(BaseModel):
-    items: Optional[List[TodoSchema]] = Field(default=None)
-    rounds_since_todo: Optional[int] = Field(default=None)
+    items: list[TodoSchema] = Field(default_factory=list, description="task list")
 
     
 def update(items: list[TodoSchema]) -> str:
