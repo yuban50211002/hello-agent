@@ -48,7 +48,7 @@ class TeammateManager:
         return {"team_name": "default", "members": {}}  # 空团队
 
     def _save_config(self):
-        self.config_path.write_text(json.dumps(self.config, indent=2))  # 持久化到磁盘
+        self.config_path.write_text(json.dumps(self.config, indent=2, ensure_ascii=False))  # 持久化到磁盘
 
     def spawn(self, name: str, role: str, prompt: str) -> str:
         with self.lock:
@@ -70,6 +70,7 @@ class TeammateManager:
                 target=self._teammate_loop,
                 args=(name, role, prompt),
                 daemon=True,  # 守护线程，主进程退出时自动结束
+                name=f"{role}_{name}"
             )
             self.threads[name] = thread
 
@@ -151,7 +152,7 @@ class MessageBus:
         # 往收件人的 .jsonl 文件末尾追加一行
         inbox_path = self.dir / f"{to}.jsonl"
         with open(inbox_path, "a") as f:  # "a" = append 模式
-            f.write(json.dumps(msg) + "\n")
+            f.write(json.dumps(msg, ensure_ascii=False) + "\n")
         return f"Sent {msg_type} to {to}"
 
     def read_inbox(self, name: str) -> list:
