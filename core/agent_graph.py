@@ -155,7 +155,7 @@ def create_agent(
             todo_manager.rounds_since_todo += 1
 
         if todo_manager.rounds_since_todo >= 3:
-            return {"messages": [AIMessage(content="现在更新任务状态和依赖")]}
+            return {"messages": [AIMessage(content="现在更新任务状态和依赖\n\n<reminder>若无任务则忽略此消息</reminder>")]}
         pass
     
     def after_agent(state: MyState, config: RunnableConfig, store: BaseStore):

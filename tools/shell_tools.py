@@ -620,9 +620,3 @@ def format_result(result: dict[str, Any]):
 
 # 兼容旧版本
 my_shell_tool = shell_execute
-
-
-# 保留导出供程序直接使用
-def get_shell_executor() -> ShellExecutor:
-    """获取 ShellExecutor 实例（用于直接调用）"""
-    return _shell_executor

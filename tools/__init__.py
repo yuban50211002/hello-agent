@@ -4,7 +4,6 @@ from .shell_tools import (
     my_shell_tool,
     shell_execute,
     ShellExecutor,
-    get_shell_executor,
 )
 from .todo_tool import todo_tool
 from .skills_tool import load_skill
@@ -23,7 +22,6 @@ __all__ = [
     "my_shell_tool",
     "shell_execute",
     "ShellExecutor",
-    "get_shell_executor",
     "todo_tool",
     "load_skill",
     "TASK_MANAGE_TOOLS",

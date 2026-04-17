@@ -104,21 +104,28 @@ class TeammateManager:
                 async with (AsyncRedisSaver.from_conn_string(redis_client=redis_client, ttl={"default_ttl": 120}) as checkpointer):
                     await checkpointer.asetup()
                     teammate = create_teammate(name=name, role=role, llm=kimi_model, checkpointer=checkpointer)
-                    for _ in range(10):
+                    await teammate.ainvoke(input={"messages": [HumanMessage(content=prompt)]}, config=config)
+                    while True:
                         received = message_bus.read_inbox(name=name)
                         if received:
+                            # 繁忙
+                            with self.lock:
+                                self._find_member(name)["status"] = "working"
                             msgs: list = [HumanMessage(content=json.dumps(m, ensure_ascii=False)) for m in received]
                             input_state = {
                                 "messages": msgs
                             }
                             await teammate.ainvoke(input=input_state, config=config)
+                        else:
+                            # 空闲
+                            with self.lock:
+                                self._find_member(name)["status"] = "idle"
                         await asyncio.sleep(1)
-                    # 更新状态
-                    with self.lock:
-                        self._find_member(name)["status"] = "idle"
-                        self._save_config()
             except Exception as e:
                 raise RuntimeError(f"{thread_id}运行过程发生错误") from e
+            finally:
+                with self.lock:
+                    self._find_member(name)["status"] = "shutdown"
 
         asyncio.run(arun())
 
