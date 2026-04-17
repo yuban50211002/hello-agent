@@ -41,10 +41,9 @@ def create_teammate(role: str, name: str, llm: BaseChatModel, checkpointer: Chec
 
         # 更新系统消息
         sys_msg = SystemMessage(content=f"""你的名字是{name}，在团队中扮演{role}角色。
-        
         # 重要规则
-        - 任务描述不清晰时必须询问
-        - 完成任务后答复结果(发送消息)
+        - 用户表述不清晰时必须询问
+        - 回答时必须使用 send_message
         - 不要闲聊
         - 言语简洁，不要废话
 

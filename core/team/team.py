@@ -109,14 +109,17 @@ class TeammateManager:
                     while True:
                         received = message_bus.read_inbox(name=name)
                         if received:
+                            message_bus.send(sender=name, to="USER", content=f"已收到消息{json.dumps(received, ensure_ascii=False)}")
                             # 繁忙
                             with self.lock:
                                 self._find_member(name)["status"] = "working"
                             msgs: list = [HumanMessage(content=json.dumps(m, ensure_ascii=False)) for m in received]
+                            msgs.append(HumanMessage(content="<reminder>使用 send_message 回复消息</reminder>"))
                             input_state = {
                                 "messages": msgs
                             }
-                            await teammate.ainvoke(input=input_state, config=config)
+                            result = await teammate.ainvoke(input=input_state, config=config)
+                            message_bus.send(sender=name, to="USER", content=f"处理完消息{json.dumps(result.get('messages')[-1].content, ensure_ascii=False)}")
                         else:
                             # 空闲
                             with self.lock:
